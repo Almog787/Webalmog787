@@ -1,0 +1,130 @@
+name: Deep Site Extractor for AI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Target website URL (including https://)"
+        required: true
+        type: string
+      max_pages:
+        description: "Maximum number of pages to crawl (1-200)"
+        required: false
+        default: "25"
+        type: string
+      max_depth:
+        description: "Maximum link depth from root (0-5)"
+        required: false
+        default: "2"
+        type: string
+      viewports:
+        description: "Viewports to capture"
+        required: false
+        default: "desktop+mobile"
+        type: choice
+        options:
+          - desktop+mobile
+          - desktop-only
+      stealth_mode:
+        description: "Browser stealth profile"
+        required: false
+        default: "chrome-xvfb"
+        type: choice
+        options:
+          - chrome-xvfb
+          - chromium-headless
+      unpack_js:
+        description: "Unpack JS bundles via SourceMaps and webcrack"
+        required: false
+        default: true
+        type: boolean
+      compress_output:
+        description: "Tree-sitter compress unpacked JS in Repomix (layout/animations stay full)"
+        required: false
+        default: true
+        type: boolean
+      token_budget:
+        description: "Soft token warning threshold"
+        required: false
+        default: "180000"
+        type: string
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js 22 LTS
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install engine dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Install Xvfb, Patchright browsers, and Dembrandt browser
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
+          npx patchright install-deps chromium
+          npx patchright install chrome
+          npx patchright install chromium
+          npx dembrandt install-browser
+
+      - name: Run deterministic extraction engine
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DEPTH: ${{ inputs.max_depth }}
+          VIEWPORTS: ${{ inputs.viewports }}
+          STEALTH_MODE: ${{ inputs.stealth_mode }}
+          UNPACK_JS: ${{ inputs.unpack_js }}
+          COMPRESS_OUTPUT: ${{ inputs.compress_output }}
+          TOKEN_BUDGET: ${{ inputs.token_budget }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          EXTRACTED_DIR: ./extracted
+          CRAWLEE_STORAGE_DIR: ./storage
+        run: |
+          if [ "${{ inputs.stealth_mode }}" = "chrome-xvfb" ]; then
+            xvfb-run -a --server-args="-screen 0 1440x900x24" npm run crawl
+          else
+            npm run crawl
+          fi
+
+      - name: Pack all extracted data into single AI context text file
+        run: |
+          OUT_FILE="ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt"
+          CONFIG_FILE="repomix.config.json"
+          if [ "${{ inputs.compress_output }}" = "false" ]; then
+            CONFIG_FILE="repomix.full.config.json"
+          fi
+          npx repomix ./extracted --config "$CONFIG_FILE" --no-gitignore --style xml --output "$OUT_FILE" --token-count-tree 1000
+          BYTES=$(wc -c < "$OUT_FILE")
+          EST_TOKENS=$((BYTES / 4))
+          {
+            echo "### Deterministic Site Extraction Complete"
+            echo "- **Target URL:** ${{ inputs.target_url }}"
+            echo "- **Output Artifact:** \`$OUT_FILE\`"
+            echo "- **Size:** $BYTES bytes (~$EST_TOKENS estimated tokens)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EST_TOKENS" -gt "${{ inputs.token_budget }}" ]; then
+            echo "::warning::Estimated tokens ($EST_TOKENS) exceeded TOKEN_BUDGET (${{ inputs.token_budget }})."
+            echo "- **Budget Warning:** Exceeded \`${{ inputs.token_budget }}\` tokens. Re-run with smaller \`max_pages\` for high-precision slices." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload unified AI context text file (unzipped)
+        uses: actions/upload-artifact@v7
+        with:
+          path: ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 3

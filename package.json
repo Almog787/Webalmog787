@@ -1,0 +1,27 @@
+{
+  "name": "deterministic-site-extractor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node -e \"import('node:http').then(({default:h})=>h.createServer((_,r)=>{r.writeHead(200,{'content-type':'text/html;charset=utf-8'});r.end('<!doctype html><html><head><title>Deterministic Site Extractor</title></head><body style=font-family:system-ui,sans-serif;padding:2rem;background:#0b0f17;color:#e5e7eb><h1>Deterministic Site Extractor Engine</h1><p>Headless GitHub Actions CLI repository (Zero-AI, Node.js 22 LTS + TypeScript ESM).</p><p>Run via GitHub Actions <code>workflow_dispatch</code> or <code>TARGET_URL=https://example.com npm run crawl</code>.</p></body></html>')}).listen(3000,'0.0.0.0',()=>console.log('Engine status server listening on http://0.0.0.0:3000')))\"",
+    "crawl": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "crawlee": "^3.18.2",
+    "dembrandt": "^0.41.0",
+    "patchright": "^1.64.3",
+    "prettier": "^3.10.1",
+    "repomix": "^1.19.0",
+    "tsx": "^4.23.15",
+    "webcrack": "^2.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "5.9.3"
+  }
+}

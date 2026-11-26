@@ -1,0 +1,42 @@
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "input": {
+    "maxFileSize": 5000000
+  },
+  "output": {
+    "style": "xml",
+    "parsableStyle": true,
+    "compress": false,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "files": true,
+    "includeEmptyDirectories": false,
+    "topFilesLength": 15,
+    "truncateBase64": true,
+    "headerText": "Deterministic Zero-AI Website Extraction Context (Full Uncompressed Layout Bounds, Overlays, Animations, Design Tokens, DOM, CSS & Unpacked Client JS).",
+    "patterns": [
+      { "pattern": "manifest.json", "compress": false },
+      { "pattern": "design-system/**", "compress": false },
+      { "pattern": "pages/**/layout-tree.json", "compress": false },
+      { "pattern": "pages/**/overlays.json", "compress": false },
+      { "pattern": "pages/**/animations.json", "compress": false },
+      { "pattern": "pages/**/*.html", "compress": false },
+      { "pattern": "pages/**/*.css", "compress": false },
+      { "pattern": "client-src/from-sourcemaps/**", "compress": false },
+      { "pattern": "client-src/unpacked/**", "compress": false },
+      { "pattern": "client-src/raw-bundles/**", "directoryStructureOnly": true },
+      { "pattern": "**/node_modules/**", "directoryStructureOnly": true }
+    ]
+  },
+  "ignore": {
+    "useGitignore": false,
+    "useDefaultPatterns": true,
+    "customPatterns": ["**/*.png", "**/*.jpg", "**/*.woff2"]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  },
+  "tokenCount": {
+    "encoding": "o200k_base"
+  }
+}

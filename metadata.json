@@ -1,0 +1,6 @@
+{
+  "name": "Deterministic Site Extractor",
+  "description": "Zero-AI deterministic website deep-extraction engine for GitHub Actions producing layout trees, overlays, animations, design tokens, and unpacked source code.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
