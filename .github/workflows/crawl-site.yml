@@ -78,7 +78,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
-          cache: "npm"
 
       - name: Setup Go 1.23 (Katana & Wappalyzergo CLI)
         uses: actions/setup-go@v5
@@ -90,13 +89,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache Playwright/Patchright browser binaries & Go tools
+      - name: Cache npm, Playwright/Patchright browsers & Go tools
         uses: actions/cache@v4
         with:
           path: |
+            ~/.npm
             ~/.cache/ms-playwright
             ~/go/bin
-          key: ${{ runner.os }}-tools-${{ hashFiles('package.json') }}
+          key: ${{ runner.os }}-tools-${{ hashFiles('package-lock.json', 'package.json') }}
           restore-keys: |
             ${{ runner.os }}-tools-
 

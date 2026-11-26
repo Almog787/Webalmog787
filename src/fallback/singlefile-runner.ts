@@ -1,28 +1,41 @@
 import { spawn } from 'node:child_process';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { chromium } from 'patchright';
 import type { SingleFileSummary } from '../types.js';
 
 const SINGLEFILE_TIMEOUT_MS = 60_000;
+
+function resolveChromiumExecutable(): string | undefined {
+  try {
+    const execPath = chromium.executablePath();
+    if (execPath && fsSync.existsSync(execPath)) {
+      return execPath;
+    }
+  } catch {
+    // Let SingleFile fall back to system browser paths
+  }
+  return undefined;
+}
 
 function runSingleFileCli(
   targetUrl: string,
   outputPath: string,
 ): Promise<{ ok: boolean; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(
-      'npx',
-      [
-        'single-file',
-        targetUrl,
-        outputPath,
-        '--browser-arg=--no-sandbox',
-        '--browser-arg=--disable-dev-shm-usage',
-      ],
-      {
-        stdio: ['ignore', 'ignore', 'pipe'],
-      },
-    );
+    const execPath = resolveChromiumExecutable();
+    const args = [
+      'single-file',
+      targetUrl,
+      outputPath,
+      '--browser-arg=--no-sandbox',
+      '--browser-arg=--disable-dev-shm-usage',
+      ...(execPath ? [`--browser-executable-path=${execPath}`] : []),
+    ];
+    const child = spawn('npx', args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
 
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
