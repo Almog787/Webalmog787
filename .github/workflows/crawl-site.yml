@@ -72,13 +72,17 @@ jobs:
             npm install
           fi
 
-      - name: Install Xvfb, Patchright browsers, and Dembrandt browser
+      - name: Install Xvfb display server
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Install Patchright browsers (Chrome & Chromium)
         run: |
-          sudo apt-get update && sudo apt-get install -y xvfb
           npx patchright install-deps chromium
           npx patchright install chrome
           npx patchright install chromium
-          npx dembrandt install-browser
+
+      - name: Install Dembrandt browser
+        run: npx dembrandt install-browser
 
       - name: Run deterministic extraction engine
         env:
@@ -93,11 +97,12 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           EXTRACTED_DIR: ./extracted
           CRAWLEE_STORAGE_DIR: ./storage
+          CRAWLEE_MEMORY_MBYTES: "5120"
         run: |
           if [ "${{ inputs.stealth_mode }}" = "chrome-xvfb" ]; then
-            xvfb-run -a --server-args="-screen 0 1440x900x24" npm run crawl
+            stdbuf -oL -eL xvfb-run -a --server-args="-screen 0 1440x900x24" npm run crawl
           else
-            npm run crawl
+            stdbuf -oL -eL npm run crawl
           fi
 
       - name: Pack all extracted data into single AI context text file
@@ -107,7 +112,7 @@ jobs:
           if [ "${{ inputs.compress_output }}" = "false" ]; then
             CONFIG_FILE="repomix.full.config.json"
           fi
-          npx repomix ./extracted --config "$CONFIG_FILE" --no-gitignore --style xml --output "$OUT_FILE" --token-count-tree 1000
+          stdbuf -oL -eL npx repomix ./extracted --config "$CONFIG_FILE" --no-gitignore --style xml --output "$OUT_FILE" --token-count-tree 1000
           BYTES=$(wc -c < "$OUT_FILE")
           EST_TOKENS=$((BYTES / 4))
           {

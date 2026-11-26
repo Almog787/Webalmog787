@@ -122,7 +122,11 @@ async function runPrettierFallback(
 ): Promise<boolean> {
   await fs.mkdir(outputDir, { recursive: true });
   try {
-    const formatted = await prettier.format(asset.content, {
+    const code =
+      typeof asset.content === 'string'
+        ? asset.content
+        : await fs.readFile(asset.filePath, 'utf8');
+    const formatted = await prettier.format(code, {
       parser: 'babel',
       semi: true,
       singleQuote: true,
@@ -156,29 +160,43 @@ export async function runWebcrackQueue(
   let prettierFallbackCount = 0;
   const warnings: string[] = [];
 
-  for (const asset of jsAssets) {
+  for (let idx = 0; idx < jsAssets.length; idx++) {
+    const asset = jsAssets[idx]!;
+    const baseName = path.basename(asset.filePath);
     const decision = shouldSkipBundleForWebcrack(asset, recoveredBundleHashes);
     if (decision.skip) {
+      console.log(
+        `[Webcrack ${idx + 1}/${jsAssets.length}] Skipped ${baseName} (${decision.reason})`,
+      );
       continue;
     }
+
+    const kb = Math.max(1, Math.round(asset.sizeBytes / 1024));
+    const startedAt = Date.now();
+    console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Unpacking ${baseName} (${kb} KB)...`);
 
     const bundleName = path.basename(asset.filePath, path.extname(asset.filePath));
     const outputDir = path.join(unpackedRoot, bundleName);
     const result = await runWorkerWithTimeout(workerPath, asset.filePath, outputDir);
+    const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
 
     if (result.ok && result.mode === 'webcrack') {
       filesUnpacked++;
+      console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via webcrack (${elapsedSec}s)`);
     } else if (result.ok && result.mode === 'prettier') {
       prettierFallbackCount++;
       filesUnpacked++;
+      console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
     } else {
       const okPrettier = await runPrettierFallback(asset, outputDir);
       if (okPrettier) {
         prettierFallbackCount++;
         filesUnpacked++;
+        console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
       } else {
+        console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Failed ${baseName} (${elapsedSec}s)`);
         warnings.push(
-          `Skipped unpacking ${path.basename(asset.filePath)}: ${result.error ?? 'unknown error'}`,
+          `Skipped unpacking ${baseName}: ${result.error ?? 'unknown error'}`,
         );
       }
     }

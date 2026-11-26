@@ -45,9 +45,25 @@ function runDembrandtProcess(targetUrl: string): Promise<{ code: number | null; 
     );
 
     let stderr = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) {
+          console.log(`[Dembrandt] ${trimmed}`);
+        }
+      }
+    });
     child.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
       if (stderr.length < 4096) {
-        stderr += chunk.toString('utf8');
+        stderr += text;
+      }
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) {
+          console.log(`[Dembrandt:err] ${trimmed}`);
+        }
       }
     });
 

@@ -131,7 +131,7 @@ export interface CollectedAsset {
   kind: CollectedAssetKind;
   hash: string;
   filePath: string;
-  content: string;
+  content?: string;
   sizeBytes: number;
   sourceMapHeader?: string;
   pageSlug?: string;

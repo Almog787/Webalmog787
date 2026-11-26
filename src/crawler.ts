@@ -110,6 +110,7 @@ interface PageSessionHandles {
 
 export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult> {
   process.env.CRAWLEE_STORAGE_DIR = config.storageDir;
+  process.env.CRAWLEE_MEMORY_MBYTES ??= '5120';
 
   const networkCollector = new NetworkCollector(config.extractedDir);
   const pageEntries: ManifestPageEntry[] = [];
@@ -119,12 +120,14 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
   let totalLayoutNodes = 0;
   let totalOverlays = 0;
   let totalAnimations = 0;
+  let pageCounter = 0;
 
   const sessionMap = new WeakMap<Page, PageSessionHandles>();
   const targetOrigin = new URL(config.targetUrl).origin;
   const targetHostname = new URL(config.targetUrl).hostname;
 
   const seedUrls = new Set<string>([stripTrackingParams(config.targetUrl)]);
+  console.log(`[Sitemap] Checking ${targetOrigin}/sitemap.xml...`);
   try {
     const sitemap = await Sitemap.load(
       `${targetOrigin}/sitemap.xml`,
@@ -141,7 +144,9 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         // Ignore malformed sitemap entry
       }
     }
+    console.log(`[Sitemap] Seeded ${seedUrls.size} URL(s) (cap ${config.maxPages}).`);
   } catch (err) {
+    console.log(`[Sitemap] No usable sitemap found; starting from root URL.`);
     warnings.push(
       `Sitemap discovery skipped (${targetOrigin}/sitemap.xml): ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -175,7 +180,7 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
     browserPoolOptions: {
       useFingerprints: false,
       maxOpenPagesPerBrowser: 2,
-      retireBrowserAfterPageCount: 15,
+      retireBrowserAfterPageCount: 10,
     },
     maxConcurrency: 2,
     maxRequestsPerCrawl: config.maxPages,
@@ -202,6 +207,8 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         }
         usedSlugs.add(slug);
 
+        console.log(`[Crawl ->] Loading ${request.url} (slug: ${slug})`);
+
         const detachNetwork = networkCollector.attachToPage(page, () => slug);
         let cdpClient: CDPSession | null = null;
         let animationTracker: AnimationTracker | null = null;
@@ -225,6 +232,8 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
     ],
 
     requestHandler: async ({ page, request, enqueueLinks, response }) => {
+      const pageNum = ++pageCounter;
+      const startedAt = Date.now();
       const handles = sessionMap.get(page);
       const slug = handles?.slug ?? urlToSlug(request.url);
       let cdpClient = handles?.cdpClient ?? null;
@@ -235,7 +244,7 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
           .waitForLoadState('networkidle', { timeout: 10000 })
           .catch(() => undefined);
 
-        await enqueueLinks({
+        const enqueued = await enqueueLinks({
           strategy: 'same-hostname',
           transformRequestFunction: (req: RequestOptions) => {
             req.url = stripTrackingParams(req.url);
@@ -246,6 +255,9 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         const finalUrl = page.url();
         const title = await page.title().catch(() => '');
         const status = response?.status() ?? 200;
+        console.log(
+          `[Page ${pageNum}/${config.maxPages}] Loaded ${finalUrl} (HTTP ${status}, +${enqueued.processedRequests.length} links)`,
+        );
 
         const activeCdpClient: CDPSession =
           cdpClient ?? (await page.context().newCDPSession(page));
@@ -255,6 +267,7 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         await page.setViewportSize(desktopViewport);
         await page.waitForTimeout(200);
 
+        console.log(`[Page ${pageNum}/${config.maxPages}] Probing scroll, :hover/:focus & overlays...`);
         const probedStates = await probePageStates(page, activeCdpClient, desktopViewport);
 
         const rawDesktopSnapshot = (await activeCdpClient.send(
@@ -268,9 +281,10 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
 
         const decodedDesktop = normalizeDomSnapshot(rawDesktopSnapshot, desktopViewport);
         totalLayoutNodes += decodedDesktop.viewportSnapshot.nodeCount;
-        totalOverlays +=
+        const pageOverlaysCount =
           decodedDesktop.overlays.length +
           probedStates.reduce((acc, item) => acc + item.revealedOverlays.length, 0);
+        totalOverlays += pageOverlaysCount;
 
         const layoutOutput: PageLayoutOutput = {
           url: finalUrl,
@@ -297,14 +311,16 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
           fallbackTracker,
           networkCollector.getAllAssets('css'),
         );
-        totalAnimations +=
+        const pageAnimCount =
           animationsOutput.cdpStartedAnimations.length +
           animationsOutput.waapiAnimations.length +
           animationsOutput.cssKeyframes.length;
+        totalAnimations += pageAnimCount;
 
         const rawHtml = await page.content();
         const sanitizedHtml = sanitizeRenderedHtml(rawHtml);
 
+        let mobileNodesCount = 0;
         if (config.viewports === 'desktop+mobile') {
           const mobileViewport = { width: 390, height: 844 };
           await page.setViewportSize(mobileViewport);
@@ -321,7 +337,8 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
 
           const decodedMobile = normalizeDomSnapshot(rawMobileSnapshot, mobileViewport);
           layoutOutput.viewports.mobile = decodedMobile.viewportSnapshot;
-          totalLayoutNodes += decodedMobile.viewportSnapshot.nodeCount;
+          mobileNodesCount = decodedMobile.viewportSnapshot.nodeCount;
+          totalLayoutNodes += mobileNodesCount;
         }
 
         await networkCollector.flush();
@@ -347,6 +364,13 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
             'utf8',
           ),
         ]);
+
+        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+        const mobileSummary =
+          config.viewports === 'desktop+mobile' ? `, mobile=${mobileNodesCount}` : '';
+        console.log(
+          `[Page ${pageNum}/${config.maxPages}] Saved pages/${slug}/ (desktop=${decodedDesktop.viewportSnapshot.nodeCount}${mobileSummary}, overlays=${pageOverlaysCount}, anims=${pageAnimCount}) in ${elapsedSec}s`,
+        );
 
         pageEntries.push({
           slug,

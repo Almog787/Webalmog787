@@ -170,7 +170,9 @@ async function resolveMapText(
 
   const cached = getCollectedMapByUrl(resolvedUrl);
   if (cached) {
-    return cached.content;
+    return typeof cached.content === 'string'
+      ? cached.content
+      : await fs.readFile(cached.filePath, 'utf8').catch(() => null);
   }
 
   try {
@@ -197,8 +199,19 @@ export async function unpackSourceMaps(
   const warnings: string[] = [];
   let filesRecovered = 0;
 
-  for (const asset of jsAssets) {
-    const mappingRef = extractSourceMappingUrl(asset.content, asset.sourceMapHeader);
+  for (let idx = 0; idx < jsAssets.length; idx++) {
+    const asset = jsAssets[idx]!;
+    let assetCode: string;
+    try {
+      assetCode =
+        typeof asset.content === 'string'
+          ? asset.content
+          : await fs.readFile(asset.filePath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const mappingRef = extractSourceMappingUrl(assetCode, asset.sourceMapHeader);
     if (!mappingRef) {
       continue;
     }
@@ -223,6 +236,7 @@ export async function unpackSourceMaps(
     }
 
     recoveredBundleHashes.add(asset.hash);
+    let recoveredFromBundle = 0;
 
     for (const entry of entries) {
       const targetPath = path.resolve(outRoot, entry.sourcePath);
@@ -236,7 +250,12 @@ export async function unpackSourceMaps(
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, entry.content, 'utf8');
       filesRecovered++;
+      recoveredFromBundle++;
     }
+
+    console.log(
+      `[SourceMap ${idx + 1}/${jsAssets.length}] ${path.basename(asset.filePath)} -> recovered ${recoveredFromBundle} file(s)`,
+    );
   }
 
   return {

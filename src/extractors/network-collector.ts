@@ -24,13 +24,10 @@ function classifyAsset(url: string, contentType: string): CollectedAssetKind | n
     pathname = url.toLowerCase().split('?')[0] ?? '';
   }
 
-  if (pathname.endsWith('.map') || lowerCt.includes('application/json') && pathname.endsWith('.map')) {
+  if (pathname.endsWith('.map') || (lowerCt.includes('application/json') && pathname.endsWith('.map'))) {
     return 'map';
   }
-  if (
-    pathname.endsWith('.css') ||
-    lowerCt.includes('text/css')
-  ) {
+  if (pathname.endsWith('.css') || lowerCt.includes('text/css')) {
     return 'css';
   }
   if (
@@ -54,6 +51,13 @@ function safeFileBaseName(url: string, fallbackExt: string): string {
   } catch {
     return `asset.${fallbackExt}`;
   }
+}
+
+export async function readAssetText(asset: CollectedAsset): Promise<string> {
+  if (typeof asset.content === 'string') {
+    return asset.content;
+  }
+  return fs.readFile(asset.filePath, 'utf8');
 }
 
 export class NetworkCollector {
@@ -120,6 +124,7 @@ export class NetworkCollector {
 
     const sourceMapHeader = headers['sourcemap'] || headers['x-sourcemap'];
     const pageSlug = getPageSlug();
+    const sizeBytes = Buffer.byteLength(processedText, 'utf8');
 
     if (kind === 'css' && pageSlug) {
       let slugSet = this.pageCssHashes.get(pageSlug);
@@ -166,13 +171,13 @@ export class NetworkCollector {
       );
     }
 
+    // Store metadata only; file contents live on disk to keep crawler RAM usage minimal
     const asset: CollectedAsset = {
       url,
       kind,
       hash,
       filePath: targetPath,
-      content: processedText,
-      sizeBytes: Buffer.byteLength(processedText, 'utf8'),
+      sizeBytes,
       ...(sourceMapHeader ? { sourceMapHeader } : {}),
       ...(pageSlug ? { pageSlug } : {}),
     };

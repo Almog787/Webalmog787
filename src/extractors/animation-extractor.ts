@@ -371,12 +371,20 @@ export async function extractPageAnimations(
   }
 
   for (const cssAsset of collectedCssAssets) {
-    const parsedFromRaw = extractCssKeyframesFromText(cssAsset.content, cssAsset.url);
-    for (const entry of parsedFromRaw) {
-      const key = `${entry.name}::${entry.rulesText}`;
-      if (!keyframeMap.has(key)) {
-        keyframeMap.set(key, entry);
+    try {
+      const cssText =
+        typeof cssAsset.content === 'string'
+          ? cssAsset.content
+          : await (await import('node:fs/promises')).readFile(cssAsset.filePath, 'utf8');
+      const parsedFromRaw = extractCssKeyframesFromText(cssText, cssAsset.url);
+      for (const entry of parsedFromRaw) {
+        const key = `${entry.name}::${entry.rulesText}`;
+        if (!keyframeMap.has(key)) {
+          keyframeMap.set(key, entry);
+        }
       }
+    } catch {
+      // Ignore unreadable CSS file
     }
   }
 
