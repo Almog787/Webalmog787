@@ -95,6 +95,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CrawlConfig {
   const stealthMode = parseStealthMode(env.STEALTH_MODE);
   const unpackJs = parseBool(env.UNPACK_JS, true);
   const compressOutput = parseBool(env.COMPRESS_OUTPUT, true);
+  const enableKatana = parseBool(env.ENABLE_KATANA, true);
+  const enablePurgeCss = parseBool(env.ENABLE_PURGECSS, true);
+  const enableSingleFile = parseBool(env.ENABLE_SINGLEFILE, true);
 
   const rawBudget = env.TOKEN_BUDGET?.trim();
   const parsedBudget = rawBudget ? Number.parseInt(rawBudget, 10) : 180000;
@@ -117,6 +120,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CrawlConfig {
 
   const extractedDir = path.resolve(env.EXTRACTED_DIR?.trim() || './extracted');
   const storageDir = path.resolve(env.CRAWLEE_STORAGE_DIR?.trim() || './storage');
+  const rawSnapshot = env.SNAPSHOT_OUT_PATH?.trim();
+  const snapshotOutPath = rawSnapshot ? path.resolve(rawSnapshot) : undefined;
 
   return {
     targetUrl,
@@ -130,5 +135,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CrawlConfig {
     proxyUrl,
     extractedDir,
     storageDir,
+    ...(snapshotOutPath ? { snapshotOutPath } : {}),
+    enableKatana,
+    enablePurgeCss,
+    enableSingleFile,
   };
 }

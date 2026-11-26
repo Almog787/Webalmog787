@@ -55,7 +55,7 @@ export function shouldSkipBundleForWebcrack(
 
 interface WorkerMessage {
   ok: boolean;
-  mode: 'webcrack' | 'prettier' | 'failed';
+  mode: 'webcrack' | 'wakaru' | 'prettier' | 'failed';
   error?: string;
 }
 
@@ -91,7 +91,7 @@ function runWorkerWithTimeout(
         resolve({
           ok: false,
           mode: 'failed',
-          error: `webcrack worker timed out after ${WORKER_TIMEOUT_MS}ms`,
+          error: `worker timed out after ${WORKER_TIMEOUT_MS}ms`,
         });
       }
     }, WORKER_TIMEOUT_MS);
@@ -171,6 +171,7 @@ export async function runWebcrackQueue(
   }
 
   let filesUnpacked = 0;
+  let wakaruUnpackedCount = 0;
   let prettierFallbackCount = 0;
   const warnings: string[] = [];
 
@@ -180,14 +181,14 @@ export async function runWebcrackQueue(
     const decision = shouldSkipBundleForWebcrack(asset, recoveredBundleHashes);
     if (decision.skip) {
       console.log(
-        `[Webcrack ${idx + 1}/${jsAssets.length}] Skipped ${baseName} (${decision.reason})`,
+        `[Unpack ${idx + 1}/${jsAssets.length}] Skipped ${baseName} (${decision.reason})`,
       );
       continue;
     }
 
     const kb = Math.max(1, Math.round(asset.sizeBytes / 1024));
     const startedAt = Date.now();
-    console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Unpacking ${baseName} (${kb} KB)...`);
+    console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Processing ${baseName} (${kb} KB)...`);
 
     const bundleName = path.basename(asset.filePath, path.extname(asset.filePath));
     const outputDir = path.join(unpackedRoot, bundleName);
@@ -196,19 +197,23 @@ export async function runWebcrackQueue(
 
     if (result.ok && result.mode === 'webcrack') {
       filesUnpacked++;
-      console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via webcrack (${elapsedSec}s)`);
+      console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Done ${baseName} via webcrack (${elapsedSec}s)`);
+    } else if (result.ok && result.mode === 'wakaru') {
+      filesUnpacked++;
+      wakaruUnpackedCount++;
+      console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Done ${baseName} via wakaru (${elapsedSec}s)`);
     } else if (result.ok && result.mode === 'prettier') {
       prettierFallbackCount++;
       filesUnpacked++;
-      console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
+      console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
     } else {
       const okPrettier = await runPrettierFallback(asset, outputDir);
       if (okPrettier) {
         prettierFallbackCount++;
         filesUnpacked++;
-        console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
+        console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Done ${baseName} via prettier fallback (${elapsedSec}s)`);
       } else {
-        console.log(`[Webcrack ${idx + 1}/${jsAssets.length}] Failed ${baseName} (${elapsedSec}s)`);
+        console.log(`[Unpack ${idx + 1}/${jsAssets.length}] Failed ${baseName} (${elapsedSec}s)`);
         warnings.push(
           `Skipped unpacking ${baseName}: ${result.error ?? 'unknown error'}`,
         );
@@ -218,6 +223,7 @@ export async function runWebcrackQueue(
 
   return {
     filesUnpacked,
+    wakaruUnpackedCount,
     prettierFallbackCount,
     warnings,
   };

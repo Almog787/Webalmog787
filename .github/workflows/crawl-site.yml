@@ -34,12 +34,27 @@ on:
           - chrome-xvfb
           - chromium-headless
       unpack_js:
-        description: "Unpack JS bundles via SourceMaps and webcrack"
+        description: "Unpack JS bundles via SourceMaps, Webcrack, and Wakaru"
         required: false
         default: true
         type: boolean
       compress_output:
         description: "Tree-sitter compress unpacked JS in Repomix (layout/animations stay full)"
+        required: false
+        default: true
+        type: boolean
+      enable_katana:
+        description: "Run Katana Go crawler for early endpoint & JS route discovery"
+        required: false
+        default: true
+        type: boolean
+      enable_purgecss:
+        description: "Prune unused CSS rules via PurgeCSS before packing"
+        required: false
+        default: true
+        type: boolean
+      enable_singlefile:
+        description: "Save offline self-contained HTML snapshot via SingleFile CLI"
         required: false
         default: true
         type: boolean
@@ -63,6 +78,27 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
+          cache: "npm"
+
+      - name: Setup Go 1.23 (Katana & Wappalyzergo CLI)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Setup Python 3.12 (Scrapling anti-bot fallback)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Playwright/Patchright browser binaries & Go tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/go/bin
+          key: ${{ runner.os }}-tools-${{ hashFiles('package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-tools-
 
       - name: Install engine dependencies
         run: |
@@ -71,6 +107,23 @@ jobs:
           else
             npm install
           fi
+
+      - name: Install Go recon CLIs (Katana & Wappalyzergo CLI)
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          if ! command -v katana >/dev/null 2>&1; then
+            go install github.com/projectdiscovery/katana/cmd/katana@latest || true
+          fi
+          if ! command -v wappalyzer-cli >/dev/null 2>&1; then
+            go install -v github.com/boogah/wappalyzer-cli@main || true
+          fi
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install Scrapling anti-bot fallback (non-fatal)
+        run: |
+          python3 -m pip install --upgrade pip || true
+          pip install "scrapling[fetchers]" || true
+          scrapling install || true
 
       - name: Install Xvfb display server
         run: sudo apt-get update && sudo apt-get install -y xvfb
@@ -93,11 +146,15 @@ jobs:
           STEALTH_MODE: ${{ inputs.stealth_mode }}
           UNPACK_JS: ${{ inputs.unpack_js }}
           COMPRESS_OUTPUT: ${{ inputs.compress_output }}
+          ENABLE_KATANA: ${{ inputs.enable_katana }}
+          ENABLE_PURGECSS: ${{ inputs.enable_purgecss }}
+          ENABLE_SINGLEFILE: ${{ inputs.enable_singlefile }}
           TOKEN_BUDGET: ${{ inputs.token_budget }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
           EXTRACTED_DIR: ./extracted
           CRAWLEE_STORAGE_DIR: ./storage
           CRAWLEE_MEMORY_MBYTES: "5120"
+          SNAPSHOT_OUT_PATH: extractions/snapshots/snapshot-run-${{ github.run_number }}-${{ github.run_attempt }}.html
         run: |
           if [ "${{ inputs.stealth_mode }}" = "chrome-xvfb" ]; then
             stdbuf -oL -eL xvfb-run -a --server-args="-screen 0 1440x900x24" npm run crawl
@@ -128,19 +185,28 @@ jobs:
             echo "- **Budget Warning:** Exceeded \`${{ inputs.token_budget }}\` tokens. Re-run with smaller \`max_pages\` for high-precision slices." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Commit extracted output to repository folder
+      - name: Commit extracted output & snapshot to repository folder
         run: |
           OUT_FILE="extractions/ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt"
-          BYTES=$(wc -c < "$OUT_FILE")
+          SNAP_FILE="extractions/snapshots/snapshot-run-${{ github.run_number }}-${{ github.run_attempt }}.html"
           MAX_GIT_BYTES=$((95 * 1024 * 1024))
-          if [ "$BYTES" -gt "$MAX_GIT_BYTES" ]; then
-            echo "::warning::Output file ($BYTES bytes) exceeds GitHub's 95 MB safe push threshold; skipping git push (download from Artifacts instead)."
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin "${{ github.ref_name }}" || true
-          git add "$OUT_FILE"
+          if [ -f "$OUT_FILE" ]; then
+            BYTES=$(wc -c < "$OUT_FILE")
+            if [ "$BYTES" -le "$MAX_GIT_BYTES" ]; then
+              git add "$OUT_FILE"
+            else
+              echo "::warning::Context file ($BYTES bytes) exceeds 95 MB Git push limit; available in Artifacts."
+            fi
+          fi
+          if [ -f "$SNAP_FILE" ]; then
+            SNAP_BYTES=$(wc -c < "$SNAP_FILE")
+            if [ "$SNAP_BYTES" -le "$MAX_GIT_BYTES" ]; then
+              git add "$SNAP_FILE"
+            fi
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "chore(extract): save run #${{ github.run_number }}-${{ github.run_attempt }} (${{ inputs.target_url }})"
             git push origin "HEAD:${{ github.ref_name }}"

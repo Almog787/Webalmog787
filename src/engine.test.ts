@@ -23,6 +23,11 @@ import {
   runWebcrackQueue,
   shouldSkipBundleForWebcrack,
 } from './extractors/webcrack-runner.js';
+import { optimizeSvgMarkup } from './extractors/svg-optimizer.js';
+import { filterKatanaSeedPages } from './recon/katana-runner.js';
+import { detectTechFallbackFromResponse } from './recon/tech-detector.js';
+import { analyzeCssToWallaceTokens } from './design/wallace-analyzer.js';
+import { purgeCssStrings } from './design/css-purger.js';
 import type { CdpCaptureSnapshotResult, CollectedAsset } from './types.js';
 
 test('config: validates TARGET_URL, clamps bounds, and exposes 27 computed styles', () => {
@@ -261,9 +266,85 @@ test('webcrack-runner: skips vendor/oversized/recovered bundles and forks worker
     };
     const summary = await runWebcrackQueue([asset], new Set(), tmpDir);
     assert.equal(summary.filesUnpacked, 1);
+    assert.equal(summary.wakaruUnpackedCount, 1);
+    assert.equal(summary.prettierFallbackCount, 0);
     const outFiles = await fs.readdir(path.join(tmpDir, 'client-src', 'unpacked', 'app.min'));
     assert.ok(outFiles.length >= 1);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('katana-runner: filterKatanaSeedPages filters same-host page URLs and ignores static assets', () => {
+  const seeds = filterKatanaSeedPages(
+    [
+      'https://example.com/about#team',
+      'https://example.com/assets/app.js',
+      'https://example.com/logo.svg',
+      'https://cdn.other.com/blog',
+      'https://example.com/about#contact',
+      'https://example.com/pricing',
+    ],
+    'example.com',
+    5,
+  );
+  assert.deepEqual(seeds, [
+    'https://example.com/about',
+    'https://example.com/pricing',
+  ]);
+});
+
+test('tech-detector: detectTechFallbackFromResponse identifies frameworks from headers and HTML', () => {
+  const detected = detectTechFallbackFromResponse(
+    'https://example.com',
+    'server: cloudflare\nx-powered-by: Next.js',
+    '<div id="__NEXT_DATA__"></div><script src="/gsap.min.js"></script><div class="elementor-widget"></div>',
+  );
+  const names = detected.map((d) => d.name);
+  assert.equal(names.includes('Next.js'), true);
+  assert.equal(names.includes('Cloudflare'), true);
+  assert.equal(names.includes('GSAP'), true);
+  assert.equal(names.includes('Elementor'), true);
+});
+
+test('svg-optimizer: optimizeSvgMarkup preserves viewBox and minifies whitespace/comments', () => {
+  const raw =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><!-- icon --><path d="M 0 0 L 24 24" fill="#000000" /></svg>';
+  const optimized = optimizeSvgMarkup(raw);
+  assert.equal(optimized.includes('viewBox="0 0 24 24"'), true);
+  assert.equal(optimized.includes('<!--'), false);
+  assert.ok(optimized.length < raw.length);
+});
+
+test('wallace-analyzer: analyzeCssToWallaceTokens extracts deterministic CSS design tokens', () => {
+  const css = `
+    .hero {
+      color: #ff3366;
+      background-color: #111827;
+      font-family: "Inter", sans-serif;
+      font-size: 48px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+      transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+  `;
+  const result = analyzeCssToWallaceTokens(css);
+  assert.ok(result.metrics.colorsCount >= 2);
+  assert.ok(result.metrics.fontSizesCount >= 1);
+  assert.ok(result.metrics.fontFamiliesCount >= 1);
+  assert.ok(result.metrics.boxShadowsCount >= 1);
+  assert.ok(result.metrics.durationsCount >= 1);
+});
+
+test('css-purger: purgeCssStrings removes unused selectors while preserving active selectors and keyframes', async () => {
+  const css = `
+    .used-btn { color: red; }
+    .unused-card { color: blue; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  `;
+  const html = ['<button class="used-btn">Go</button>'];
+  const purged = await purgeCssStrings(css, html);
+  assert.equal(purged.includes('.used-btn'), true);
+  assert.equal(purged.includes('.unused-card'), false);
+  assert.equal(purged.includes('@keyframes fadeIn'), true);
+});
+

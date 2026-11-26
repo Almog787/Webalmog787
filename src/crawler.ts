@@ -18,6 +18,7 @@ import {
 import { NetworkCollector } from './extractors/network-collector.js';
 import { normalizeDomSnapshot } from './extractors/snapshot-normalizer.js';
 import { probePageStates } from './extractors/state-prober.js';
+import { SvgAssetCollector } from './extractors/svg-optimizer.js';
 import type {
   CdpCaptureSnapshotResult,
   CrawlConfig,
@@ -68,17 +69,14 @@ export function urlToSlug(rawUrl: string): string {
 }
 
 export function sanitizeRenderedHtml(html: string): string {
-  // Remove raw <script> tags (JS code is handled separately via SourceMaps/webcrack)
   let cleaned = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
   cleaned = cleaned.replace(/<script\b[^>]*\/>/gi, '');
 
-  // Truncate base64 data: URIs > 256 chars
   cleaned = cleaned.replace(
     /data:[^;,\s"')>]+;base64,[A-Za-z0-9+/=]+/gi,
     (match) => (match.length > 256 ? `[base64-omitted:${match.length}-chars]` : match),
   );
 
-  // Truncate SVG <path d="..."> attributes > 2048 chars
   cleaned = cleaned.replace(
     /(<path\b[^>]*?\bd=)(["'])([\s\S]*?)\2/gi,
     (fullMatch, prefix: string, quote: string, dValue: string) => {
@@ -97,6 +95,7 @@ export interface CrawlRunResult {
   totalLayoutNodes: number;
   totalOverlays: number;
   totalAnimations: number;
+  svgIconsOptimized: number;
   warnings: string[];
   networkCollector: NetworkCollector;
 }
@@ -108,11 +107,15 @@ interface PageSessionHandles {
   animationTracker: AnimationTracker | null;
 }
 
-export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult> {
+export async function runCrawlStage(
+  config: CrawlConfig,
+  extraSeedUrls: string[] = [],
+): Promise<CrawlRunResult> {
   process.env.CRAWLEE_STORAGE_DIR = config.storageDir;
   process.env.CRAWLEE_MEMORY_MBYTES ??= '5120';
 
   const networkCollector = new NetworkCollector(config.extractedDir);
+  const svgCollector = new SvgAssetCollector(config.extractedDir);
   const pageEntries: ManifestPageEntry[] = [];
   const usedSlugs = new Set<string>();
   const warnings: string[] = [];
@@ -127,6 +130,18 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
   const targetHostname = new URL(config.targetUrl).hostname;
 
   const seedUrls = new Set<string>([stripTrackingParams(config.targetUrl)]);
+  for (const extra of extraSeedUrls) {
+    if (seedUrls.size >= config.maxPages) break;
+    try {
+      const parsed = new URL(extra);
+      if (parsed.hostname === targetHostname) {
+        seedUrls.add(stripTrackingParams(parsed.toString()));
+      }
+    } catch {
+      // Ignore invalid seed URL
+    }
+  }
+
   console.log(`[Sitemap] Checking ${targetOrigin}/sitemap.xml...`);
   try {
     const sitemap = await Sitemap.load(
@@ -144,9 +159,9 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         // Ignore malformed sitemap entry
       }
     }
-    console.log(`[Sitemap] Seeded ${seedUrls.size} URL(s) (cap ${config.maxPages}).`);
+    console.log(`[Sitemap] Total seeded URLs: ${seedUrls.size} (cap ${config.maxPages}).`);
   } catch (err) {
-    console.log(`[Sitemap] No usable sitemap found; starting from root URL.`);
+    console.log(`[Sitemap] No usable sitemap found; seeded ${seedUrls.size} URL(s).`);
     warnings.push(
       `Sitemap discovery skipped (${targetOrigin}/sitemap.xml): ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -286,6 +301,8 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
           probedStates.reduce((acc, item) => acc + item.revealedOverlays.length, 0);
         totalOverlays += pageOverlaysCount;
 
+        const svgsAdded = await svgCollector.collectFromPage(page, slug);
+
         const layoutOutput: PageLayoutOutput = {
           url: finalUrl,
           viewports: {
@@ -379,7 +396,7 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
         const mobileSummary =
           config.viewports === 'desktop+mobile' ? `, mobile=${mobileNodesCount}` : '';
         console.log(
-          `[Page ${pageNum}/${config.maxPages}] Saved pages/${slug}/ (desktop=${decodedDesktop.viewportSnapshot.nodeCount}${mobileSummary}, overlays=${pageOverlaysCount}, anims=${pageAnimCount}) in ${elapsedSec}s`,
+          `[Page ${pageNum}/${config.maxPages}] Saved pages/${slug}/ (desktop=${decodedDesktop.viewportSnapshot.nodeCount}${mobileSummary}, overlays=${pageOverlaysCount}, anims=${pageAnimCount}, +${svgsAdded} svgs) in ${elapsedSec}s`,
         );
 
         pageEntries.push({
@@ -411,12 +428,14 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
   }
 
   await networkCollector.flush();
+  const svgIconsOptimized = await svgCollector.writeIndex();
 
   return {
     pages: pageEntries,
     totalLayoutNodes,
     totalOverlays,
     totalAnimations,
+    svgIconsOptimized,
     warnings,
     networkCollector,
   };

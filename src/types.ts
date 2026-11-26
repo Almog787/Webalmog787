@@ -13,6 +13,10 @@ export interface CrawlConfig {
   proxyUrl?: string;
   extractedDir: string;
   storageDir: string;
+  snapshotOutPath?: string;
+  enableKatana: boolean;
+  enablePurgeCss: boolean;
+  enableSingleFile: boolean;
 }
 
 export interface Bounds {
@@ -145,12 +149,61 @@ export interface SourceMapRecoverySummary {
 
 export interface WebcrackSummary {
   filesUnpacked: number;
+  wakaruUnpackedCount: number;
   prettierFallbackCount: number;
   warnings: string[];
 }
 
 export interface DembrandtSummary {
   extracted: boolean;
+  warnings: string[];
+}
+
+export interface TechStackResult {
+  targetUrl: string;
+  detector: 'wappalyzergo' | 'builtin-fallback';
+  technologies: Array<{
+    name: string;
+    categories: string[];
+    version?: string;
+  }>;
+  warnings: string[];
+}
+
+export interface KatanaReconResult {
+  ran: boolean;
+  discoveredUrls: string[];
+  seedPageUrls: string[];
+  warnings: string[];
+}
+
+export interface WallaceAnalysisSummary {
+  analyzed: boolean;
+  cssFilesCount: number;
+  totalBytes: number;
+  warnings: string[];
+}
+
+export interface PurgeCssSummary {
+  purged: boolean;
+  filesProcessed: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  warnings: string[];
+}
+
+export interface SvgAssetEntry {
+  hash: string;
+  file: string;
+  selectorHint: string;
+  pageSlug: string;
+  bytesBefore: number;
+  bytesAfter: number;
+}
+
+export interface SingleFileSummary {
+  saved: boolean;
+  outputPath?: string;
   warnings: string[];
 }
 
@@ -179,7 +232,16 @@ export interface ManifestData {
     totalAnimations: number;
     sourceMapFilesRecovered: number;
     webcrackFilesUnpacked: number;
+    wakaruFilesUnpacked: number;
+    svgIconsOptimized: number;
+    cssBytesBeforePurge: number;
+    cssBytesAfterPurge: number;
+    katanaDiscoveredUrls: number;
+    technologiesDetected: number;
     designSystemExtracted: boolean;
+    wallaceTokensExtracted: boolean;
+    scraplingFallbackUsed: boolean;
+    singleFileSaved: boolean;
   };
   pages: ManifestPageEntry[];
   warnings: string[];
