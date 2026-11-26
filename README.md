@@ -14,7 +14,7 @@ Zero-AI, fully deterministic deep website extraction engine running on **Node.js
 1. Open the **Actions** tab in your GitHub repository.
 2. Select **Deep Site Extractor for AI** -> **Run workflow**.
 3. Enter `target_url` (must include `https://` or `http://`) and adjust optional bounds (`max_pages`, `max_depth`, `viewports`, `stealth_mode`, `unpack_js`, `compress_output`, `token_budget`).
-4. When the run finishes, download `ai-site-context-run-<N>-<A>.txt` from **Artifacts**.
+4. When the run finishes, the unified file is committed automatically into `extractions/ai-site-context-run-<N>-<A>.txt` in your repository and also uploaded to **Artifacts** (for 3 days).
 
 ## Handling Cloud IP Blocks (Proxy Setup)
 

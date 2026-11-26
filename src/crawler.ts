@@ -345,24 +345,34 @@ export async function runCrawlStage(config: CrawlConfig): Promise<CrawlRunResult
 
         const pageDir = path.join(config.extractedDir, 'pages', slug);
         await fs.mkdir(pageDir, { recursive: true });
+        const cssRefs = networkCollector.getPageCssRefs(slug);
 
         await Promise.all([
           fs.writeFile(path.join(pageDir, 'page.html'), sanitizedHtml, 'utf8'),
           fs.writeFile(
             path.join(pageDir, 'layout-tree.json'),
-            JSON.stringify(layoutOutput, null, 2),
+            JSON.stringify(layoutOutput),
             'utf8',
           ),
           fs.writeFile(
             path.join(pageDir, 'overlays.json'),
-            JSON.stringify(overlaysOutput, null, 2),
+            JSON.stringify(overlaysOutput),
             'utf8',
           ),
           fs.writeFile(
             path.join(pageDir, 'animations.json'),
-            JSON.stringify(animationsOutput, null, 2),
+            JSON.stringify(animationsOutput),
             'utf8',
           ),
+          ...(cssRefs.length > 0
+            ? [
+                fs.writeFile(
+                  path.join(pageDir, 'styles-used.json'),
+                  JSON.stringify(cssRefs),
+                  'utf8',
+                ),
+              ]
+            : []),
         ]);
 
         const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);

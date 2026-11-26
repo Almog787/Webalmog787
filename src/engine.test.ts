@@ -144,6 +144,10 @@ test('snapshot-normalizer: decodes columnar CDP snapshot, filters hidden nodes, 
   assert.equal(decoded.viewportSnapshot.nodeCount, 2);
   assert.equal(decoded.viewportSnapshot.nodes[0]?.tag, 'header');
   assert.equal(decoded.viewportSnapshot.nodes[0]?.text, 'Welcome Home');
+  assert.equal(decoded.viewportSnapshot.nodes[0]?.styles['display'], 'flex');
+  assert.equal(decoded.viewportSnapshot.nodes[0]?.styles['z-index'], '50');
+  assert.equal(decoded.viewportSnapshot.nodes[0]?.styles['opacity'], undefined);
+  assert.equal(decoded.viewportSnapshot.nodes[0]?.styles['visibility'], undefined);
   assert.equal(decoded.viewportSnapshot.nodes[1]?.role, 'dialog');
   assert.equal(decoded.overlays.length, 2);
   assert.equal(decoded.overlays[0]?.selectorHint, 'header#main-nav.sticky.top-0');

@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -107,29 +107,49 @@ jobs:
 
       - name: Pack all extracted data into single AI context text file
         run: |
-          OUT_FILE="ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt"
+          mkdir -p extractions
+          OUT_FILE="extractions/ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt"
           CONFIG_FILE="repomix.config.json"
           if [ "${{ inputs.compress_output }}" = "false" ]; then
             CONFIG_FILE="repomix.full.config.json"
           fi
           stdbuf -oL -eL npx repomix ./extracted --config "$CONFIG_FILE" --no-gitignore --style xml --output "$OUT_FILE" --token-count-tree 1000
           BYTES=$(wc -c < "$OUT_FILE")
+          MB=$(awk "BEGIN {printf \"%.2f\", $BYTES / (1024*1024)}")
           EST_TOKENS=$((BYTES / 4))
           {
             echo "### Deterministic Site Extraction Complete"
             echo "- **Target URL:** ${{ inputs.target_url }}"
-            echo "- **Output Artifact:** \`$OUT_FILE\`"
-            echo "- **Size:** $BYTES bytes (~$EST_TOKENS estimated tokens)"
+            echo "- **Repository Path:** \`$OUT_FILE\`"
+            echo "- **Size:** $BYTES bytes ($MB MB, ~$EST_TOKENS estimated tokens)"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$EST_TOKENS" -gt "${{ inputs.token_budget }}" ]; then
             echo "::warning::Estimated tokens ($EST_TOKENS) exceeded TOKEN_BUDGET (${{ inputs.token_budget }})."
             echo "- **Budget Warning:** Exceeded \`${{ inputs.token_budget }}\` tokens. Re-run with smaller \`max_pages\` for high-precision slices." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Commit extracted output to repository folder
+        run: |
+          OUT_FILE="extractions/ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt"
+          BYTES=$(wc -c < "$OUT_FILE")
+          MAX_GIT_BYTES=$((95 * 1024 * 1024))
+          if [ "$BYTES" -gt "$MAX_GIT_BYTES" ]; then
+            echo "::warning::Output file ($BYTES bytes) exceeds GitHub's 95 MB safe push threshold; skipping git push (download from Artifacts instead)."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git add "$OUT_FILE"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(extract): save run #${{ github.run_number }}-${{ github.run_attempt }} (${{ inputs.target_url }})"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
       - name: Upload unified AI context text file (unzipped)
         uses: actions/upload-artifact@v7
         with:
-          path: ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt
+          path: extractions/ai-site-context-run-${{ github.run_number }}-${{ github.run_attempt }}.txt
           archive: false
           if-no-files-found: error
           retention-days: 3

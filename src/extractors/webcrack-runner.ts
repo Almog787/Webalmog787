@@ -14,6 +14,20 @@ const VENDOR_PATTERNS = [
   'lodash',
   'jquery',
   'chunk-vendors',
+  'wp-includes',
+  'wp-emoji',
+  'elementor',
+  'swiper',
+  'gsap',
+  'polyfill',
+  'core-js',
+  'analytics',
+  'gtag',
+  'fbevents',
+  'slick',
+  'owl.carousel',
+  'bootstrap',
+  'fontawesome',
 ];
 
 export function shouldSkipBundleForWebcrack(

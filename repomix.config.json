@@ -17,21 +17,24 @@
     "patterns": [
       { "pattern": "manifest.json", "compress": false },
       { "pattern": "design-system/**", "compress": false },
+      { "pattern": "styles/**", "compress": false },
       { "pattern": "pages/**/layout-tree.json", "compress": false },
       { "pattern": "pages/**/overlays.json", "compress": false },
       { "pattern": "pages/**/animations.json", "compress": false },
+      { "pattern": "pages/**/styles-used.json", "compress": false },
       { "pattern": "pages/**/*.html", "compress": false },
       { "pattern": "pages/**/*.css", "compress": false },
       { "pattern": "client-src/from-sourcemaps/**", "compress": true },
       { "pattern": "client-src/unpacked/**", "compress": true },
       { "pattern": "client-src/raw-bundles/**", "directoryStructureOnly": true },
+      { "pattern": "client-src/raw-maps/**", "directoryStructureOnly": true },
       { "pattern": "**/node_modules/**", "directoryStructureOnly": true }
     ]
   },
   "ignore": {
     "useGitignore": false,
     "useDefaultPatterns": true,
-    "customPatterns": ["**/*.png", "**/*.jpg", "**/*.woff2"]
+    "customPatterns": ["**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp", "**/*.woff", "**/*.woff2", "**/*.ttf", "**/*.mp4", "**/*.webm"]
   },
   "security": {
     "enableSecurityCheck": true

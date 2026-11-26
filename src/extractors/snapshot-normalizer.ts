@@ -138,6 +138,46 @@ export function overlayKey(entry: OverlayNodeEntry): string {
   return `${entry.selectorHint}|${Math.round(entry.bounds.x)},${Math.round(entry.bounds.y)},${Math.round(entry.bounds.width)},${Math.round(entry.bounds.height)}`;
 }
 
+const DEFAULT_STYLE_VALUES: Record<string, Set<string>> = {
+  position: new Set(['static']),
+  'z-index': new Set(['auto']),
+  top: new Set(['auto']),
+  left: new Set(['auto']),
+  right: new Set(['auto']),
+  bottom: new Set(['auto']),
+  margin: new Set(['0px']),
+  padding: new Set(['0px']),
+  'border-radius': new Set(['0px']),
+  'border-width': new Set(['0px']),
+  'background-color': new Set(['rgba(0, 0, 0, 0)', 'transparent']),
+  opacity: new Set(['1']),
+  visibility: new Set(['visible']),
+  overflow: new Set(['visible']),
+  transform: new Set(['none']),
+  'box-shadow': new Set(['none']),
+  'grid-template-columns': new Set(['none']),
+};
+
+function pruneDefaultStyles(styles: Record<string, string>): Record<string, string> {
+  const compact: Record<string, string> = {};
+  for (const [prop, value] of Object.entries(styles)) {
+    const defaults = DEFAULT_STYLE_VALUES[prop];
+    if (defaults && defaults.has(value)) {
+      continue;
+    }
+    if (
+      prop === 'flex-direction' &&
+      value === 'row' &&
+      styles['display'] !== 'flex' &&
+      styles['display'] !== 'inline-flex'
+    ) {
+      continue;
+    }
+    compact[prop] = value;
+  }
+  return compact;
+}
+
 export function normalizeDomSnapshot(
   snapshot: CdpCaptureSnapshotResult,
   viewport: { width: number; height: number },
@@ -263,6 +303,7 @@ export function normalizeDomSnapshot(
     const parentNodeId = rawParent !== undefined && rawParent >= 0 ? rawParent : null;
     const paintOrder = layoutPaintOrders[layoutIdx] ?? 0;
     const bounds: Bounds = { x, y, width, height };
+    const compactStyles = pruneDefaultStyles(styles);
 
     const normalized: NormalizedLayoutNode = {
       nodeId: nodeIdx,
@@ -276,7 +317,7 @@ export function normalizeDomSnapshot(
       ...(text ? { text } : {}),
       bounds,
       paintOrder,
-      styles,
+      styles: compactStyles,
     };
 
     const overlayCheck = isOverlayCandidate(styles, role, ariaModal);
@@ -291,7 +332,7 @@ export function normalizeDomSnapshot(
         ...(overlayCheck.reason ? { reason: overlayCheck.reason } : {}),
         bounds,
         paintOrder,
-        styles,
+        styles: compactStyles,
       };
       overlays.push(overlayEntry);
       rawOverlaysByKey.set(overlayKey(overlayEntry), overlayEntry);

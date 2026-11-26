@@ -64,7 +64,7 @@ export class NetworkCollector {
   private readonly extractedDir: string;
   private readonly assetsByHash = new Map<string, CollectedAsset>();
   private readonly assetsByUrl = new Map<string, CollectedAsset>();
-  private readonly pageCssHashes = new Map<string, Set<string>>();
+  private readonly pageCssFiles = new Map<string, Set<string>>();
   private readonly pendingWrites = new Set<Promise<void>>();
 
   constructor(extractedDir: string) {
@@ -126,26 +126,13 @@ export class NetworkCollector {
     const pageSlug = getPageSlug();
     const sizeBytes = Buffer.byteLength(processedText, 'utf8');
 
-    if (kind === 'css' && pageSlug) {
-      let slugSet = this.pageCssHashes.get(pageSlug);
-      if (!slugSet) {
-        slugSet = new Set<string>();
-        this.pageCssHashes.set(pageSlug, slugSet);
-      }
-      if (!slugSet.has(hash)) {
-        slugSet.add(hash);
-        const stylesDir = path.join(this.extractedDir, 'pages', pageSlug, 'styles');
-        await fs.mkdir(stylesDir, { recursive: true });
-        const fileName = `${hash}-${safeFileBaseName(url, 'css')}`;
-        const cssFilePath = path.join(stylesDir, fileName);
-        await fs.writeFile(cssFilePath, processedText, 'utf8');
-      }
-    }
-
     if (this.assetsByHash.has(hash)) {
       const existing = this.assetsByHash.get(hash)!;
       if (!this.assetsByUrl.has(url)) {
         this.assetsByUrl.set(url, existing);
+      }
+      if (kind === 'css' && pageSlug) {
+        this.recordPageCssRef(pageSlug, path.basename(existing.filePath));
       }
       return;
     }
@@ -162,16 +149,17 @@ export class NetworkCollector {
       targetPath = path.join(dir, `${hash}-${safeFileBaseName(url, 'map')}`);
       await fs.writeFile(targetPath, processedText, 'utf8');
     } else {
-      targetPath = path.join(
-        this.extractedDir,
-        'pages',
-        pageSlug || 'index',
-        'styles',
-        `${hash}-${safeFileBaseName(url, 'css')}`,
-      );
+      // Save each unique CSS file once globally under extracted/styles/ to eliminate N-page duplication
+      const dir = path.join(this.extractedDir, 'styles');
+      await fs.mkdir(dir, { recursive: true });
+      const fileName = `${hash}-${safeFileBaseName(url, 'css')}`;
+      targetPath = path.join(dir, fileName);
+      await fs.writeFile(targetPath, processedText, 'utf8');
+      if (pageSlug) {
+        this.recordPageCssRef(pageSlug, fileName);
+      }
     }
 
-    // Store metadata only; file contents live on disk to keep crawler RAM usage minimal
     const asset: CollectedAsset = {
       url,
       kind,
@@ -184,6 +172,19 @@ export class NetworkCollector {
 
     this.assetsByHash.set(hash, asset);
     this.assetsByUrl.set(url, asset);
+  }
+
+  private recordPageCssRef(pageSlug: string, fileName: string): void {
+    let refs = this.pageCssFiles.get(pageSlug);
+    if (!refs) {
+      refs = new Set<string>();
+      this.pageCssFiles.set(pageSlug, refs);
+    }
+    refs.add(`styles/${fileName}`);
+  }
+
+  getPageCssRefs(pageSlug: string): string[] {
+    return [...(this.pageCssFiles.get(pageSlug) ?? [])];
   }
 
   async flush(): Promise<void> {

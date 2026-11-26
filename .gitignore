@@ -3,7 +3,7 @@ dist/
 extracted/
 storage/
 output/
-ai-site-context*.txt
+/ai-site-context*.txt
 repomix-output.*
 .DS_Store
 *.log
