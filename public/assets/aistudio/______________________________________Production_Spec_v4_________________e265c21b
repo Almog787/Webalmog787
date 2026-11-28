@@ -1,0 +1,1331 @@
+﻿להלן מסמך האפיון המלא, המאוחד והסופי (Production Spec v4) לאחר הטמעת כלל
+התיקונים, הביקורות והקשחות האבטחה — מוכן להעתקה ולהטמעה ישירה במאגר הציבורי
+הקיים שלך לצד מערכת סריקת האתרים.
+
+
+פרק 1: סקירה כללית, גבולות מערכת ועקרונות הנדסיים
+
+
+1.1 מטרה ותפקיד במאגר הקיים
+
+
+תת־המערכת stt/ מוסיפה למאגר הציבורי הקיים יכולת תמלול עברית אסינכרונית בדיוק
+מרבי על גבי תשתית GitHub Actions (ubuntu-24.04), תוך בידוד מוחלט ממערכת סריקת
+האתרים הקיימת בשורש המאגר (src/, package.json, crawl-site.yml).
+
+
+1.2 עקרונות הליבה המיושמים בגרסה הסופית
+
+
+1.  בידוד מלא בין שתי המערכות: שתי המערכות אינן חולקות תלויות, אינן חולקות
+    מפתחות Cache, ומופעלות בנפרד בלשונית Actions.
+2.  אבטחה ופרטיות למאגר ציבורי (Public Repo Hardening):
+      - הרשאות מינימליות permissions: contents: read (ללא on: push וללא git push
+        אוטומטי).
+      - ביטול שמירת אסימון (persist-credentials: false) בכל actions/checkout@v6.
+      - העברת כל הקלטים (AUDIO_URL, AUDIO_FILE, ערכי matrix.* וכו') דרך env:
+        בלבד (חסימת Script Injection) ומיסוך מוקדם של AUDIO_URL באמצעות printf
+        '::add-mask::%s\n'.
+      - בדיקת Fail-Fast ב־2 השניות הראשונות של הריצה לאימות קיום
+        TRANSCRIPT_PASSPHRASE כאשר encrypt_output: true.
+      - הצפנת פלט אופציונלית (AES-256 ב־gpg) והסתרת שם הקובץ (slug =
+        "encrypted_audio", source = "redacted") למניעת זליגת מידע בלוגים או בשם
+        ה־Artifact.
+3.  תאימות תלויות מאומתת (ללא CUDA Wheels):
+      - נעילת torch==2.8.0+cpu, torchvision==0.23.0+cpu, torchaudio==2.8.0+cpu
+        בפקודה אחת מאוחדת מול stt/constraints-cpu.txt — תאימות מלאה
+        ל־whisperx==3.8.6 ו־pyannote-audio>=4.0.0 ללא גלישת 14 GB SSD.
+      - Lazy Import ב־merge_and_diarize.py: כש־diarize=false, שלב האיחוד משתמש
+        בספרייה התקנית של Python בלבד (ללא התקנת PyTorch כלל).
+4.  זיהוי תקינות הורדת audio_url: הגנה מפני קישורים שבורים/חסומים המחזירים דף
+    HTML (שגיאת 403/דף התחברות) במקום קובץ מדיה, עם Retry אוטומטי והודעת שגיאה
+    נקייה שאינה מדליפה את ה־URL.
+
+
+פרק 2: טבלת רכיבים וטכנולוגיות סופית
+
+
+| שכבה במערכת             | טכנולוגיה / גרסה                                                                           | תפקיד והתאמה                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| **תשתית הרצה**          | `ubuntu-24.04` (`16 GB RAM`, `4 vCPU`)                                                     | ריצה מקבילית (Matrix עד 20 מכונות) + פינוי \~15 GB דיסק מיותר מראש.                                                   |
+| **עיבוד אקוסטי וחיתוך** | `FFmpeg` + `Silero VAD >= 5.1.2`                                                           | סינון תדרי דיבור (`80Hz–7600Hz`) + `loudnorm`, וחיתוך למקטעי \~12 דקות **בנקודות שתיקה בלבד**.                        |
+| **מנוע תמלול ראשי**     | `ivrit-ai/whisper-large-v3-ct2` (או `turbo-ct2`)                                           | דיוק `float32` אוטומטי על 16 GB RAM (או `int8_float32` אם מזוהה 8 GB), `beam_size=10`, `hotwords` + `initial_prompt`. |
+| **יישור פונטי למילה**   | `whisperx==3.8.6` (`imvladikon/wav2vec2-xls-r-300m-hebrew`)                                | חותמות זמן ברמת מילה (`±50ms`), תיקון `safe_globals` ל־PyTorch 2.8, ו־Fallback אוטומטי למשפטים עם ספרות/אנגלית.       |
+| **הפרדת דוברים**        | `pyannote.audio >= 4.0.0` (`3.1` / `community-1`)                                          | מופעל אופציונלית על השמע השלם בלבד ב־`merge-and-diarize` לעקביות מזהי דוברים.                                         |
+| **תזמור ואריזה**        | `checkout@v6`, `setup-python@v6`, `cache@v5`, `upload-artifact@v7`, `download-artifact@v8` | אריזה ל־`.txt`, `.srt`, `.vtt`, `.json` (או `.tar.gz.gpg` מוצפן).                                                     |
+
+
+פרק 3: מבנה הקבצים המלא במאגר הציבורי
+
+
+/                                     # שורש המאגר הציבורי הקיים
+├── package.json                      # (קיים — ללא שינוי)
+├── tsconfig.json                     # (קיים — ללא שינוי)
+├── repomix.config.json               # (קיים — ללא שינוי)
+├── repomix.full.config.json          # (קיים — ללא שינוי)
+├── src/                              # (קיים — ללא שינוי)
+├── .gitignore                        # (לעדכן) הוספת החרגות stt/
+├── README.md                         # (לעדכן) תיעוד תת-מערכת התמלול
+├── .github/
+│   └── workflows/
+│       ├── crawl-site.yml            # (קיים — ללא שינוי)
+│       └── hebrew-stt.yml            # (חדש) Workflow התמלול הסופי
+└── stt/                              # (חדש) תת-מערכת התמלול המבודדת
+    ├── constraints-cpu.txt           # נעילת torch/torchvision/torchaudio לגרסאות +cpu
+    ├── requirements.txt              # תלויות Python 3.11
+    ├── vocabulary.txt                # מונחים כלליים (ללא מידע אישי)
+    ├── input_audio/
+    │   └── .gitkeep                  # שמירת תיקייה (קבצי שמע מוחרגים ב-.gitignore)
+    └── scripts/
+        ├── prepare_audio.py          # הורדה מאומתת, FFmpeg, Silero VAD split, Pre-warm cache
+        ├── transcribe_chunk.py       # Auto-RAM, Whisper ivrit-ai, שחרור זיכרון, WhisperX alignment
+        └── merge_and_diarize.py      # Lazy import, איחוד offsets, pyannote אופציונלי, ייצוא
+
+
+פרק 4: קוד מלא וסופי לכל קובצי המערכת
+
+
+4.1 תוספת נדרשת לקובץ .gitignore הקיים
+
+
+# Hebrew STT Engine (isolated under stt/)
+stt/workspace/
+stt/full_audio/
+stt/chunk_results/
+stt/merged_inputs/
+stt/transcripts/
+stt/transcripts.tar.gz
+stt/transcripts-encrypted.tar.gz.gpg
+stt/input_audio/*
+!stt/input_audio/.gitkeep
+
+
+4.2 stt/constraints-cpu.txt
+
+
+torch==2.8.0+cpu
+torchvision==0.23.0+cpu
+torchaudio==2.8.0+cpu
+
+
+4.3 stt/requirements.txt
+
+
+whisperx==3.8.6
+faster-whisper>=1.2.0
+silero-vad>=5.1.2
+soundfile>=0.12.1
+psutil>=6.0.0
+huggingface-hub>=0.28.1
+
+
+4.4 stt/vocabulary.txt
+
+
+# מונחים טכניים וכלליים בלבד (מאגר ציבורי).
+# מונחים פרטיים/עסקיים יש לשמור ב-Repository Secret בשם EXTRA_VOCABULARY.
+GitHub
+GitHub Actions
+TypeScript
+Python
+API
+
+
+4.5 stt/input_audio/.gitkeep
+
+
+קובץ ריק (0 בתים) לצורך שמירת התיקייה במעקב Git.
+
+
+4.6 stt/scripts/prepare_audio.py
+
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+import soundfile as sf
+
+
+
+
+def download_audio_safely(audio_url: str, dest_path: Path, retries: int = 3) -> Path:
+    clean_path_part = audio_url.split("?")[0]
+    ext = Path(clean_path_part).suffix or ".audio"
+    target = dest_path.with_suffix(ext)
+
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+    }
+
+
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(audio_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                status = getattr(resp, "status", 200)
+                if status >= 400:
+                    raise RuntimeError(f"HTTP status {status}")
+
+
+                content_type = (resp.info().get_content_type() or "").lower()
+                if content_type.startswith("text/html"):
+                    raise RuntimeError(
+                        "Remote URL returned an HTML webpage instead of direct audio/video media. "
+                        "Provide a direct download link."
+                    )
+
+
+                with open(target, "wb") as out_f:
+                    while True:
+                        buf = resp.read(1024 * 1024)
+                        if not buf:
+                            break
+                        out_f.write(buf)
+
+
+            if target.stat().st_size < 1024:
+                raise RuntimeError("Downloaded file is too small (<1 KB) to be valid media.")
+            return target
+        except (urllib.error.URLError, RuntimeError, TimeoutError) as exc:
+            last_err = exc
+            if target.exists():
+                target.unlink()
+            if attempt < retries:
+                wait_s = attempt * 3
+                print(f"[prepare] Download attempt {attempt} failed ({type(exc).__name__}); retrying in {wait_s}s...")
+                time.sleep(wait_s)
+
+
+    print(f"ERROR: Failed to download audio_url after {retries} attempts: {type(last_err).__name__}: {last_err}", file=sys.stderr)
+    sys.exit(1)
+
+
+
+
+def run_ffmpeg(input_path: Path, output_wav: Path) -> None:
+    af_filter = "highpass=f=80,lowpass=f=7600,loudnorm=I=-16:TP=-1.5:LRA=11"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(input_path),
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            "-af", af_filter,
+            str(output_wav),
+        ],
+        check=True,
+    )
+
+
+
+
+def compute_silence_cut_points(
+    wav_path: Path, target_chunk_sec: int = 720, min_chunk_sec: int = 240
+) -> list[tuple[float, float]]:
+    info = sf.info(str(wav_path))
+    total_dur = float(info.duration)
+    if total_dur <= target_chunk_sec * 1.25:
+        return [(0.0, round(total_dur, 3))]
+
+
+    from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
+
+
+    model = load_silero_vad()
+    wav = read_audio(str(wav_path), sampling_rate=16000)
+    speech_ts = get_speech_timestamps(
+        wav,
+        model,
+        sampling_rate=16000,
+        min_silence_duration_ms=450,
+        speech_pad_ms=250,
+        return_seconds=True,
+    )
+
+
+    if not speech_ts:
+        return [(0.0, round(total_dur, 3))]
+
+
+    silence_midpoints: list[float] = []
+    for i in range(len(speech_ts) - 1):
+        gap_start = float(speech_ts[i]["end"])
+        gap_end = float(speech_ts[i + 1]["start"])
+        if gap_end - gap_start >= 0.35:
+            silence_midpoints.append((gap_start + gap_end) / 2.0)
+
+
+    chunks: list[tuple[float, float]] = []
+    cur_start = 0.0
+    while cur_start < total_dur:
+        ideal_end = cur_start + target_chunk_sec
+        if ideal_end >= total_dur - min_chunk_sec:
+            chunks.append((round(cur_start, 3), round(total_dur, 3)))
+            break
+
+
+        candidates = [
+            t
+            for t in silence_midpoints
+            if (cur_start + min_chunk_sec) <= t <= (ideal_end + 180)
+        ]
+        cut_t = min(candidates, key=lambda t: abs(t - ideal_end)) if candidates else ideal_end
+        chunks.append((round(cur_start, 3), round(cut_t, 3)))
+        cur_start = cut_t
+
+
+    return chunks
+
+
+
+
+def prewarm_models(model_repo: str, enable_align: bool) -> None:
+    from huggingface_hub import snapshot_download
+
+
+    print(f"[prepare] Pre-warming Whisper model: {model_repo}")
+    snapshot_download(repo_id=model_repo)
+    if enable_align:
+        align_repo = "imvladikon/wav2vec2-xls-r-300m-hebrew"
+        print(f"[prepare] Pre-warming Hebrew wav2vec2 alignment model: {align_repo}")
+        snapshot_download(repo_id=align_repo)
+
+
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-file", default="")
+    parser.add_argument("--model-repo", default="ivrit-ai/whisper-large-v3-ct2")
+    parser.add_argument("--chunk-seconds", type=int, default=720)
+    parser.add_argument("--enable-align", action="store_true")
+    parser.add_argument("--redact-logs", action="store_true")
+    parser.add_argument("--work-dir", default="stt/workspace")
+    parser.add_argument("--full-audio-dir", default="stt/full_audio")
+    args = parser.parse_args()
+
+
+    work_dir = Path(args.work_dir)
+    chunks_dir = work_dir / "chunks"
+    full_audio_dir = Path(args.full_audio_dir)
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    full_audio_dir.mkdir(parents=True, exist_ok=True)
+
+
+    audio_url = os.environ.get("AUDIO_URL", "").strip()
+    if audio_url:
+        print("[prepare] Downloading remote audio (URL redacted in public logs)")
+        raw_input = download_audio_safely(audio_url, work_dir / "downloaded_input")
+        clean_path_part = audio_url.split("?")[0]
+        slug = "encrypted_audio" if args.redact_logs else (Path(clean_path_part).stem or "remote_audio")
+        source_label = "remote-url-redacted"
+    elif args.input_file.strip():
+        raw_input = Path(args.input_file.strip())
+        if not raw_input.exists():
+            print("ERROR: Input audio file not found.", file=sys.stderr)
+            sys.exit(1)
+        slug = "encrypted_audio" if args.redact_logs else raw_input.stem
+        source_label = "redacted" if args.redact_logs else str(raw_input)
+    else:
+        print("ERROR: Provide either audio_url or a valid audio_file path.", file=sys.stderr)
+        sys.exit(1)
+
+
+    clean_wav = full_audio_dir / "clean_audio.wav"
+    print("[prepare] Normalizing audio -> clean_audio.wav")
+    run_ffmpeg(raw_input, clean_wav)
+
+
+    if audio_url and raw_input.exists():
+        raw_input.unlink()
+
+
+    intervals = compute_silence_cut_points(clean_wav, target_chunk_sec=args.chunk_seconds)
+    manifest_chunks = []
+    for idx, (start_s, end_s) in enumerate(intervals):
+        padded_idx = f"{idx:03d}"
+        chunk_name = f"chunk_{padded_idx}.wav"
+        chunk_path = chunks_dir / chunk_name
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", str(start_s), "-to", str(end_s),
+                "-i", str(clean_wav), "-c", "copy", str(chunk_path),
+            ],
+            check=True,
+        )
+        manifest_chunks.append({
+            "idx": idx,
+            "padded_idx": padded_idx,
+            "file": chunk_name,
+            "offset_sec": start_s,
+            "duration_sec": round(end_s - start_s, 3),
+        })
+
+
+    manifest = {
+        "slug": slug,
+        "source": source_label,
+        "total_duration_sec": round(float(sf.info(str(clean_wav)).duration), 3),
+        "chunks": manifest_chunks,
+    }
+    (work_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+    prewarm_models(args.model_repo, args.enable_align)
+
+
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a", encoding="utf-8") as f:
+            f.write(f"matrix={json.dumps({'include': manifest_chunks})}\n")
+            f.write(f"slug={slug}\n")
+            f.write(f"chunk_count={len(manifest_chunks)}\n")
+
+
+
+
+if __name__ == "__main__":
+    main()
+
+
+4.7 stt/scripts/transcribe_chunk.py
+
+
+import argparse
+import gc
+import json
+import os
+import re
+from pathlib import Path
+
+
+import psutil
+import soundfile as sf
+import torch
+from faster_whisper import WhisperModel
+
+
+
+
+def select_runtime_profile(requested_compute: str) -> tuple[str, int]:
+    total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+    cpu_count = os.cpu_count() or 4
+
+
+    if requested_compute == "auto":
+        compute_type = "float32" if total_ram_gb >= 12.0 else "int8_float32"
+    else:
+        if requested_compute == "float32" and total_ram_gb < 11.0:
+            print(f"::warning::Low RAM ({total_ram_gb:.1f} GB) for float32; risk of OOM.")
+        compute_type = requested_compute
+
+
+    print(f"[runtime] RAM={total_ram_gb:.1f}GB | CPUs={cpu_count} | compute_type={compute_type}")
+    return compute_type, cpu_count
+
+
+
+
+def load_vocabulary(vocab_path: Path) -> tuple[str, str]:
+    base_prompt = "תמלול מדויק בעברית תקנית, כולל סימני פיסוק מלאים."
+    terms: list[str] = []
+
+
+    if vocab_path.exists():
+        terms.extend(
+            line.strip()
+            for line in vocab_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        )
+
+
+    secret_terms = os.environ.get("EXTRA_VOCABULARY", "").strip()
+    if secret_terms:
+        terms.extend(t.strip() for t in re.split(r"[,\n]+", secret_terms) if t.strip())
+
+
+    if not terms:
+        return base_prompt, ""
+
+
+    unique_terms = list(dict.fromkeys(terms))
+    prompt_terms = ", ".join(unique_terms)[:500]
+    prompt = f"{base_prompt} מונחים רלוונטיים: {prompt_terms}"
+    hotwords = " ".join(unique_terms[:60])
+    return prompt, hotwords
+
+
+
+
+def sanitize_hebrew_only(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\u0590-\u05FF\s]", " ", text)).strip()
+
+
+
+
+def run_whisperx_alignment(chunk_wav: Path, raw_segments: list[dict]) -> tuple[list[dict], str]:
+    if hasattr(torch.serialization, "add_safe_globals"):
+        try:
+            from omegaconf import DictConfig, ListConfig
+            torch.serialization.add_safe_globals([ListConfig, DictConfig])
+        except Exception:
+            pass
+
+
+    import whisperx
+
+
+    align_model, metadata = whisperx.load_align_model(language_code="he", device="cpu")
+    audio_np, sr = sf.read(str(chunk_wav), dtype="float32")
+    if sr != 16000:
+        audio_np = whisperx.load_audio(str(chunk_wav))
+
+
+    alignable_inputs = []
+    aligned_by_idx: dict[int, dict] = {}
+
+
+    for i, seg in enumerate(raw_segments):
+        has_digits_or_latin = bool(re.search(r"[0-9A-Za-z]", seg["text"]))
+        if has_digits_or_latin or not sanitize_hebrew_only(seg["text"]):
+            aligned_by_idx[i] = seg
+        else:
+            alignable_inputs.append({"idx": i, "start": seg["start"], "end": seg["end"], "text": seg["text"]})
+
+
+    if alignable_inputs:
+        try:
+            result = whisperx.align(
+                alignable_inputs,
+                align_model,
+                metadata,
+                audio_np,
+                "cpu",
+                return_char_alignments=False,
+            )
+            for item, orig in zip(result.get("segments", []), alignable_inputs):
+                src_seg = raw_segments[orig["idx"]]
+                words = item.get("words") or src_seg.get("words", [])
+                aligned_by_idx[orig["idx"]] = {
+                    **src_seg,
+                    "start": round(float(item.get("start", src_seg["start"])), 3),
+                    "end": round(float(item.get("end", src_seg["end"])), 3),
+                    "alignment_engine": "whisperx-wav2vec2",
+                    "words": [
+                        {
+                            "word": str(w.get("word", "")).strip(),
+                            "start": round(float(w["start"]), 3) if w.get("start") is not None else None,
+                            "end": round(float(w["end"]), 3) if w.get("end") is not None else None,
+                            "probability": round(float(w.get("score", w.get("probability", 0.0))), 4)
+                            if w.get("score", w.get("probability")) is not None
+                            else None,
+                        }
+                        for w in words
+                    ],
+                }
+        except Exception as exc:
+            print(f"::warning::WhisperX alignment fallback triggered ({type(exc).__name__})")
+            del align_model
+            gc.collect()
+            return raw_segments, f"fallback: {type(exc).__name__}"
+
+
+    ordered = [aligned_by_idx[i] for i in range(len(raw_segments))]
+    del align_model
+    gc.collect()
+    return ordered, "whisperx-wav2vec2"
+
+
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chunk-file", required=True)
+    parser.add_argument("--chunk-idx", type=int, required=True)
+    parser.add_argument("--offset-sec", type=float, required=True)
+    parser.add_argument("--model-repo", default="ivrit-ai/whisper-large-v3-ct2")
+    parser.add_argument("--compute-type", default="auto")
+    parser.add_argument("--beam-size", type=int, default=10)
+    parser.add_argument("--enable-align", action="store_true")
+    parser.add_argument("--vocab-file", default="stt/vocabulary.txt")
+    parser.add_argument("--out-file", required=True)
+    args = parser.parse_args()
+
+
+    compute_type, cpu_threads = select_runtime_profile(args.compute_type)
+    initial_prompt, hotwords = load_vocabulary(Path(args.vocab_file))
+
+
+    model = WhisperModel(
+        args.model_repo,
+        device="cpu",
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+    )
+
+
+    transcribe_kwargs = dict(
+        language="he",
+        task="transcribe",
+        beam_size=args.beam_size,
+        best_of=5,
+        patience=1.5,
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        condition_on_previous_text=False,
+        initial_prompt=initial_prompt,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=450, speech_pad_ms=300),
+    )
+    if hotwords:
+        transcribe_kwargs["hotwords"] = hotwords
+
+
+    segments_gen, info = model.transcribe(args.chunk_file, **transcribe_kwargs)
+    raw_segments = []
+    for seg in segments_gen:
+        raw_segments.append({
+            "start": round(float(seg.start), 3),
+            "end": round(float(seg.end), 3),
+            "text": seg.text.strip(),
+            "avg_logprob": round(float(seg.avg_logprob), 4),
+            "alignment_engine": "faster-whisper",
+            "words": [
+                {
+                    "word": w.word.strip(),
+                    "start": round(float(w.start), 3),
+                    "end": round(float(w.end), 3),
+                    "probability": round(float(w.probability), 4),
+                }
+                for w in (seg.words or [])
+            ],
+        })
+
+
+    del model
+    gc.collect()
+
+
+    align_status = "faster-whisper-only"
+    final_segments = raw_segments
+    if args.enable_align and raw_segments:
+        final_segments, align_status = run_whisperx_alignment(Path(args.chunk_file), raw_segments)
+
+
+    payload = {
+        "chunk_idx": args.chunk_idx,
+        "offset_sec": args.offset_sec,
+        "model": args.model_repo,
+        "compute_type": compute_type,
+        "alignment_status": align_status,
+        "language": info.language,
+        "segments": final_segments,
+    }
+    Path(args.out_file).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out_file).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+
+
+if __name__ == "__main__":
+    main()
+
+
+4.8 stt/scripts/merge_and_diarize.py
+
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+
+
+
+def fmt_srt(t: float) -> str:
+    t = max(0.0, t)
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+
+
+def fmt_vtt(t: float) -> str:
+    return fmt_srt(t).replace(",", ".")
+
+
+
+
+def run_diarization(
+    clean_wav: Path, hf_token: str, preferred_model: str
+) -> list[tuple[float, float, str]]:
+    import soundfile as sf
+    import torch
+
+
+    if hasattr(torch.serialization, "add_safe_globals"):
+        try:
+            from omegaconf import DictConfig, ListConfig
+            torch.serialization.add_safe_globals([ListConfig, DictConfig])
+        except Exception:
+            pass
+
+
+    from pyannote.audio import Pipeline
+
+
+    candidates = [
+        preferred_model,
+        "pyannote/speaker-diarization-3.1"
+        if preferred_model != "pyannote/speaker-diarization-3.1"
+        else "pyannote/speaker-diarization-community-1",
+    ]
+
+
+    pipeline = None
+    for repo in candidates:
+        try:
+            pipeline = Pipeline.from_pretrained(repo, token=hf_token)
+            print(f"[diarize] Loaded pipeline: {repo}")
+            break
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(repo, use_auth_token=hf_token)
+            print(f"[diarize] Loaded pipeline (legacy auth): {repo}")
+            break
+        except Exception as exc:
+            print(f"::warning::Could not load {repo}: {type(exc).__name__}")
+
+
+    if pipeline is None:
+        return []
+
+
+    audio_np, sr = sf.read(str(clean_wav), dtype="float32")
+    waveform = torch.from_numpy(audio_np).unsqueeze(0)
+    output = pipeline({"waveform": waveform, "sample_rate": sr})
+
+
+    turns: list[tuple[float, float, str]] = []
+    annotation = getattr(output, "speaker_diarization", output)
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        turns.append((float(turn.start), float(turn.end), str(speaker)))
+    return turns
+
+
+
+
+def assign_speaker(start: float, end: float, turns: list[tuple[float, float, str]]) -> str | None:
+    if not turns:
+        return None
+    best_speaker = None
+    best_overlap = 0.0
+    for t_start, t_end, spk in turns:
+        overlap = max(0.0, min(end, t_end) - max(start, t_start))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = spk
+    return best_speaker
+
+
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chunks-dir", required=True)
+    parser.add_argument("--clean-wav", default="")
+    parser.add_argument("--slug", required=True)
+    parser.add_argument("--diarize", action="store_true")
+    parser.add_argument("--diarization-model", default="pyannote/speaker-diarization-3.1")
+    parser.add_argument("--out-dir", default="stt/transcripts")
+    args = parser.parse_args()
+
+
+    chunk_files = sorted(Path(args.chunks_dir).rglob("chunk_*.json"), key=lambda p: p.name)
+    if not chunk_files:
+        raise FileNotFoundError(f"No chunk_*.json files found under {args.chunks_dir}")
+
+
+    merged_segments = []
+    seg_id = 1
+    meta_models = set()
+    meta_align = set()
+
+
+    for cf in chunk_files:
+        data = json.loads(cf.read_text(encoding="utf-8"))
+        offset = float(data["offset_sec"])
+        meta_models.add(f"{data.get('model')} ({data.get('compute_type')})")
+        meta_align.add(data.get("alignment_status", "unknown"))
+
+
+        for seg in data.get("segments", []):
+            abs_start = round(float(seg["start"]) + offset, 3)
+            abs_end = round(float(seg["end"]) + offset, 3)
+            words = []
+            for w in seg.get("words", []):
+                w_start = round(float(w["start"]) + offset, 3) if w.get("start") is not None else None
+                w_end = round(float(w["end"]) + offset, 3) if w.get("end") is not None else None
+                words.append({**w, "start": w_start, "end": w_end})
+            merged_segments.append({
+                "id": seg_id,
+                "start": abs_start,
+                "end": abs_end,
+                "text": seg["text"],
+                "avg_logprob": seg.get("avg_logprob"),
+                "speaker": None,
+                "words": words,
+            })
+            seg_id += 1
+
+
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
+    diarized = False
+    if args.diarize:
+        clean_wav_path = Path(args.clean_wav) if args.clean_wav else None
+        if not hf_token:
+            print("::warning::diarize=true requested, but HF_TOKEN secret is not set. Skipping diarization.")
+        elif not clean_wav_path or not clean_wav_path.exists():
+            print("::warning::clean_audio.wav missing for diarization. Skipping diarization.")
+        else:
+            print(f"[diarize] Running speaker diarization across {len(merged_segments)} segments...")
+            turns = run_diarization(clean_wav_path, hf_token, args.diarization_model)
+            if turns:
+                diarized = True
+                for seg in merged_segments:
+                    seg["speaker"] = assign_speaker(seg["start"], seg["end"], turns)
+
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = args.slug
+
+
+    txt_lines, srt_lines, vtt_lines = [], [], ["WEBVTT\n"]
+    for seg in merged_segments:
+        spk_prefix = f"[{seg['speaker']}] " if seg["speaker"] else ""
+        txt_lines.append(f"[{seg['start']:.2f} -> {seg['end']:.2f}] {spk_prefix}{seg['text']}")
+        srt_lines.append(f"{seg['id']}\n{fmt_srt(seg['start'])} --> {fmt_srt(seg['end'])}\n{spk_prefix}{seg['text']}\n")
+        vtt_lines.append(f"{fmt_vtt(seg['start'])} --> {fmt_vtt(seg['end'])}\n{spk_prefix}{seg['text']}\n")
+
+
+    (out_dir / f"{stem}.txt").write_text("\n".join(txt_lines), encoding="utf-8")
+    (out_dir / f"{stem}.srt").write_text("\n".join(srt_lines), encoding="utf-8")
+    (out_dir / f"{stem}.vtt").write_text("\n".join(vtt_lines), encoding="utf-8")
+    (out_dir / f"{stem}.json").write_text(
+        json.dumps(
+            {
+                "slug": stem,
+                "models": sorted(meta_models),
+                "alignment": sorted(meta_align),
+                "diarized": diarized,
+                "segment_count": len(merged_segments),
+                "segments": merged_segments,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"[merge] Wrote {len(merged_segments)} segments into {out_dir}")
+
+
+
+
+if __name__ == "__main__":
+    main()
+
+
+4.9 .github/workflows/hebrew-stt.yml (הגרסה הסופית והמלאה)
+
+
+name: Hebrew STT Max Accuracy (Public Repo Safe)
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      audio_url:
+        description: "Direct HTTPS URL to audio/video (masked in public logs)"
+        required: false
+        default: ""
+        type: string
+      audio_file:
+        description: "Relative path to public audio inside repo (if audio_url is empty)"
+        required: false
+        default: "stt/input_audio/sample.mp3"
+        type: string
+      model_repo:
+        description: "Hebrew Whisper CTranslate2 model"
+        required: false
+        default: "ivrit-ai/whisper-large-v3-ct2"
+        type: choice
+        options:
+          - ivrit-ai/whisper-large-v3-ct2
+          - ivrit-ai/whisper-large-v3-turbo-ct2
+      compute_type:
+        description: "Precision (auto uses full float32 on 16GB public runners)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - float32
+          - int8_float32
+      beam_size:
+        description: "Beam search width"
+        required: false
+        default: "10"
+        type: string
+      enable_whisperx_align:
+        description: "Enable WhisperX wav2vec2 forced word alignment"
+        required: false
+        default: true
+        type: boolean
+      diarize:
+        description: "Enable pyannote speaker diarization (requires HF_TOKEN secret)"
+        required: false
+        default: false
+        type: boolean
+      diarization_model:
+        description: "Pyannote diarization model (auto-falls back between 3.1 and community-1)"
+        required: false
+        default: "pyannote/speaker-diarization-3.1"
+        type: choice
+        options:
+          - pyannote/speaker-diarization-3.1
+          - pyannote/speaker-diarization-community-1
+      encrypt_output:
+        description: "Encrypt output transcripts with TRANSCRIPT_PASSPHRASE secret"
+        required: false
+        default: false
+        type: boolean
+
+
+permissions:
+  contents: read
+
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.prep.outputs.matrix }}
+      slug: ${{ steps.prep.outputs.slug }}
+      chunk_count: ${{ steps.prep.outputs.chunk_count }}
+
+
+    steps:
+      - name: Fail-fast secret validation (before heavy downloads)
+        if: ${{ inputs.encrypt_output == true || inputs.encrypt_output == 'true' }}
+        env:
+          TRANSCRIPT_PASSPHRASE: ${{ secrets.TRANSCRIPT_PASSPHRASE }}
+        run: |
+          if [ -z "$TRANSCRIPT_PASSPHRASE" ]; then
+            echo "::error::encrypt_output=true requires TRANSCRIPT_PASSPHRASE in Repository Secrets."
+            exit 1
+          fi
+
+
+      - name: Mask sensitive audio URL safely via env
+        if: ${{ inputs.audio_url != '' }}
+        env:
+          AUDIO_URL: ${{ inputs.audio_url }}
+        run: printf '::add-mask::%s\n' "$AUDIO_URL"
+
+
+      - name: Free unused GitHub runner disk space (~15 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+
+
+      - name: Cache HuggingFace & Torch models
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-pub-v4-${{ inputs.model_repo }}-align-${{ inputs.enable_whisperx_align }}-${{ hashFiles('stt/requirements.txt', 'stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-pub-v4-${{ inputs.model_repo }}-
+            stt-pub-v4-
+
+
+      - name: Install CPU-only Python stack (single unified resolution)
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchvision==0.23.0+cpu torchaudio==2.8.0+cpu \
+            -r stt/requirements.txt
+
+
+      - name: Normalize audio, split at Silero VAD silences & pre-warm model cache
+        id: prep
+        env:
+          AUDIO_URL: ${{ inputs.audio_url }}
+          AUDIO_FILE: ${{ inputs.audio_file }}
+          MODEL_REPO: ${{ inputs.model_repo }}
+          ENABLE_ALIGN: ${{ inputs.enable_whisperx_align }}
+          ENCRYPT_OUTPUT: ${{ inputs.encrypt_output }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ "$ENABLE_ALIGN" = "true" ] && [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --enable-align --redact-logs --work-dir stt/workspace --full-audio-dir stt/full_audio
+          elif [ "$ENABLE_ALIGN" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --enable-align --work-dir stt/workspace --full-audio-dir stt/full_audio
+          elif [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --redact-logs --work-dir stt/workspace --full-audio-dir stt/full_audio
+          else
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --work-dir stt/workspace --full-audio-dir stt/full_audio
+          fi
+
+
+      - name: Upload audio chunks for Matrix workers
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-chunks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/workspace/
+          retention-days: 1
+
+
+      - name: Upload full clean WAV only if speaker diarization is enabled
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-fullwav-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/full_audio/clean_audio.wav
+          retention-days: 1
+
+
+  transcribe-chunk:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+
+    steps:
+      - name: Free unused GitHub runner disk space (~15 GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+
+
+      - name: Restore cached HuggingFace & Torch models
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-pub-v4-${{ inputs.model_repo }}-align-${{ inputs.enable_whisperx_align }}-${{ hashFiles('stt/requirements.txt', 'stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-pub-v4-${{ inputs.model_repo }}-
+            stt-pub-v4-
+
+
+      - name: Install CPU-only Python stack (single unified resolution)
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchvision==0.23.0+cpu torchaudio==2.8.0+cpu \
+            -r stt/requirements.txt
+
+
+      - name: Download prepared audio chunks
+        uses: actions/download-artifact@v8
+        with:
+          name: stt-chunks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/workspace/
+
+
+      - name: Transcribe & align chunk ${{ matrix.padded_idx }}
+        env:
+          EXTRA_VOCABULARY: ${{ secrets.EXTRA_VOCABULARY }}
+          MODEL_REPO: ${{ inputs.model_repo }}
+          COMPUTE_TYPE: ${{ inputs.compute_type }}
+          BEAM_SIZE: ${{ inputs.beam_size }}
+          ENABLE_ALIGN: ${{ inputs.enable_whisperx_align }}
+          CHUNK_FILE: stt/workspace/chunks/${{ matrix.file }}
+          CHUNK_IDX: ${{ matrix.idx }}
+          OFFSET_SEC: ${{ matrix.offset_sec }}
+          PADDED_IDX: ${{ matrix.padded_idx }}
+        run: |
+          if [ "$ENABLE_ALIGN" = "true" ]; then
+            python stt/scripts/transcribe_chunk.py \
+              --chunk-file "$CHUNK_FILE" \
+              --chunk-idx "$CHUNK_IDX" \
+              --offset-sec "$OFFSET_SEC" \
+              --model-repo "$MODEL_REPO" \
+              --compute-type "$COMPUTE_TYPE" \
+              --beam-size "$BEAM_SIZE" \
+              --enable-align \
+              --vocab-file stt/vocabulary.txt \
+              --out-file "stt/chunk_results/chunk_${PADDED_IDX}.json"
+          else
+            python stt/scripts/transcribe_chunk.py \
+              --chunk-file "$CHUNK_FILE" \
+              --chunk-idx "$CHUNK_IDX" \
+              --offset-sec "$OFFSET_SEC" \
+              --model-repo "$MODEL_REPO" \
+              --compute-type "$COMPUTE_TYPE" \
+              --beam-size "$BEAM_SIZE" \
+              --vocab-file stt/vocabulary.txt \
+              --out-file "stt/chunk_results/chunk_${PADDED_IDX}.json"
+          fi
+
+
+      - name: Upload single chunk transcript JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-chunk-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.padded_idx }}
+          path: stt/chunk_results/chunk_${{ matrix.padded_idx }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+
+  merge-and-diarize:
+    needs: [prepare, transcribe-chunk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+
+    steps:
+      - name: Free unused GitHub runner disk space (~15 GB)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+
+      - name: Restore HuggingFace & Torch cache (ONLY if diarize=true)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-diarize-v4-${{ inputs.diarization_model }}-${{ hashFiles('stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-diarize-v4-
+
+
+      - name: Ensure GPG is available (only if encryption enabled)
+        if: ${{ inputs.encrypt_output == true || inputs.encrypt_output == 'true' }}
+        run: |
+          if ! command -v gpg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y gnupg
+          fi
+
+
+      - name: Install system libs & Pyannote CPU stack (ONLY if diarize=true)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchaudio==2.8.0+cpu \
+            "pyannote.audio>=4.0.0" soundfile omegaconf
+
+
+      - name: Download all chunk JSON files into isolated folder
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "stt-chunk-${{ github.run_id }}-${{ github.run_attempt }}-*"
+          merge-multiple: true
+          path: stt/merged_inputs/chunks/
+
+
+      - name: Download full WAV only if diarization is enabled
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: stt-fullwav-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/merged_inputs/full_audio/
+
+
+      - name: Merge chunks & run optional speaker diarization
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DIARIZE: ${{ inputs.diarize }}
+          DIARIZATION_MODEL: ${{ inputs.diarization_model }}
+          SLUG: ${{ needs.prepare.outputs.slug }}
+        run: |
+          if [ "$DIARIZE" = "true" ]; then
+            python stt/scripts/merge_and_diarize.py \
+              --chunks-dir stt/merged_inputs/chunks \
+              --slug "$SLUG" \
+              --diarize \
+              --diarization-model "$DIARIZATION_MODEL" \
+              --clean-wav "stt/merged_inputs/full_audio/clean_audio.wav" \
+              --out-dir stt/transcripts
+          else
+            python stt/scripts/merge_and_diarize.py \
+              --chunks-dir stt/merged_inputs/chunks \
+              --slug "$SLUG" \
+              --out-dir stt/transcripts
+          fi
+
+
+      - name: Optional AES-256 encryption for public-repo privacy
+        id: pack
+        env:
+          TRANSCRIPT_PASSPHRASE: ${{ secrets.TRANSCRIPT_PASSPHRASE }}
+          ENCRYPT_OUTPUT: ${{ inputs.encrypt_output }}
+        run: |
+          if [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            if [ -z "$TRANSCRIPT_PASSPHRASE" ]; then
+              echo "::error::encrypt_output=true requires TRANSCRIPT_PASSPHRASE secret."
+              exit 1
+            fi
+            tar -czf stt/transcripts.tar.gz -C stt/transcripts .
+            printf '%s' "$TRANSCRIPT_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --symmetric --cipher-algo AES256 -o stt/transcripts-encrypted.tar.gz.gpg stt/transcripts.tar.gz
+            rm -rf stt/transcripts stt/transcripts.tar.gz
+            echo "artifact_path=stt/transcripts-encrypted.tar.gz.gpg" >> "$GITHUB_OUTPUT"
+          else
+            echo "artifact_path=stt/transcripts/" >> "$GITHUB_OUTPUT"
+          fi
+
+
+      - name: Upload final transcripts artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: transcripts-${{ needs.prepare.outputs.slug }}-run-${{ github.run_number }}-${{ github.run_attempt }}
+          path: ${{ steps.pack.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 3
+
+
+פרק 5: סכימת הפלט ונוהל הפעלה (Production Runbook)
+
+
+5.1 פורמט פלט ה־JSON הסופי (<slug>.json)
+
+
+{
+  "slug": "encrypted_audio",
+  "models": ["ivrit-ai/whisper-large-v3-ct2 (float32)"],
+  "alignment": ["whisperx-wav2vec2"],
+  "diarized": true,
+  "segment_count": 42,
+  "segments": [
+    {
+      "id": 1,
+      "start": 1.24,
+      "end": 4.82,
+      "text": "שלום לכולם, נתחיל את הישיבה.",
+      "avg_logprob": -0.1842,
+      "speaker": "SPEAKER_00",
+      "words": [
+        { "word": "שלום", "start": 1.24, "end": 1.62, "probability": 0.981 },
+        { "word": "לכולם,", "start": 1.65, "end": 2.11, "probability": 0.964 }
+      ]
+    }
+  ]
+}
+
+
+במקביל נוצרים <slug>.txt, <slug>.srt, ו־<slug>.vtt (מוכנים לצפייה בנגני וידאו או
+להדבקה ב־AI).
+
+
+5.2 הגדרת Secrets ורישיון HuggingFace (לפני הפעלה)
+
+
+  - TRANSCRIPT_PASSPHRASE (חובה כש־encrypt_output: true): סיסמה חזקה להצפנת הפלט
+    במאגר ציבורי.
+  - HF_TOKEN (נדרש רק כש־diarize: true): אסימון קריאה של HuggingFace לאחר אישור
+    תנאי הרישיון:
+      - עבור pyannote/speaker-diarization-3.1: לאשר גם את
+        pyannote/speaker-diarization-3.1 וגם את pyannote/segmentation-3.0.
+      - עבור pyannote/speaker-diarization-community-1: אישור רישיון יחיד בדף
+        המודל.
+  - EXTRA_VOCABULARY (אופציונלי): רשימת שמות פרטיים ומונחים רגישים מופרדים בפסיק
+    או בשורה חדשה — אינם נשמרים בקוד הציבורי.
+
+
+5.3 סדר בדיקות הקבלה במאגר הציבורי
+
+
+1.  אימות git status: ודא שרק הקבצים החדשים תחת stt/,
+    .github/workflows/hebrew-stt.yml, ו־.gitignore מסומנים ל־Commit (אפס שינוי
+    ב־src/ וב־crawl-site.yml).
+2.  בדיקה 1 — Fail-Fast: הפעל encrypt_output: true (לפני הוספת
+    TRANSCRIPT_PASSPHRASE או זמנית על סביבת בדיקה) וודא עצירה מיידית תוך שניות
+    בשלב הראשון.
+3.  בדיקה 2 — Smoke (diarize: false): הרץ audio_url של קובץ ציבורי קצר (~1 דקה)
+    עם turbo-ct2 ו־enable_whisperx_align: true ← אימות קבלת .txt, .srt, .vtt,
+    .json.
+4.  בדיקה 3 — איכות מלאה + הצפנה + דוברים: הרץ קובץ מלא עם
+    ivrit-ai/whisper-large-v3-ct2, compute_type: auto (float32 על 16 GB ציבורי),
+    diarize: true, ו־encrypt_output: true ← פענוח במחשב המקומי עם:
+    gpg -d transcripts-encrypted.tar.gz.gpg | tar -xz
