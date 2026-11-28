@@ -1,7 +1,0 @@
-# מונחים טכניים וכלליים בלבד (מאגר ציבורי).
-# מונחים פרטיים/עסקיים יש לשמור ב-Repository Secret בשם EXTRA_VOCABULARY.
-GitHub
-GitHub Actions
-TypeScript
-Python
-API
