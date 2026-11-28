@@ -1,0 +1,369 @@
+name: Hebrew STT Max Accuracy (Public Repo Safe)
+
+on:
+  workflow_dispatch:
+    inputs:
+      audio_url:
+        description: "Direct HTTPS URL to audio/video (masked in public logs)"
+        required: false
+        default: ""
+        type: string
+      audio_file:
+        description: "Relative path to public audio inside repo (if audio_url is empty)"
+        required: false
+        default: "stt/input_audio/sample.mp3"
+        type: string
+      model_repo:
+        description: "Hebrew Whisper CTranslate2 model"
+        required: false
+        default: "ivrit-ai/whisper-large-v3-ct2"
+        type: choice
+        options:
+          - ivrit-ai/whisper-large-v3-ct2
+          - ivrit-ai/whisper-large-v3-turbo-ct2
+      compute_type:
+        description: "Precision (auto uses full float32 on 16GB public runners)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - float32
+          - int8_float32
+      beam_size:
+        description: "Beam search width"
+        required: false
+        default: "10"
+        type: string
+      enable_whisperx_align:
+        description: "Enable WhisperX wav2vec2 forced word alignment"
+        required: false
+        default: true
+        type: boolean
+      diarize:
+        description: "Enable pyannote speaker diarization (requires HF_TOKEN secret)"
+        required: false
+        default: false
+        type: boolean
+      diarization_model:
+        description: "Pyannote diarization model (auto-falls back between 3.1 and community-1)"
+        required: false
+        default: "pyannote/speaker-diarization-3.1"
+        type: choice
+        options:
+          - pyannote/speaker-diarization-3.1
+          - pyannote/speaker-diarization-community-1
+      encrypt_output:
+        description: "Encrypt output transcripts with TRANSCRIPT_PASSPHRASE secret"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.prep.outputs.matrix }}
+      slug: ${{ steps.prep.outputs.slug }}
+      chunk_count: ${{ steps.prep.outputs.chunk_count }}
+
+    steps:
+      - name: Fail-fast secret validation (before heavy downloads)
+        if: ${{ inputs.encrypt_output == true || inputs.encrypt_output == 'true' }}
+        env:
+          TRANSCRIPT_PASSPHRASE: ${{ secrets.TRANSCRIPT_PASSPHRASE }}
+        run: |
+          if [ -z "$TRANSCRIPT_PASSPHRASE" ]; then
+            echo "::error::encrypt_output=true requires TRANSCRIPT_PASSPHRASE in Repository Secrets."
+            exit 1
+          fi
+
+      - name: Mask sensitive audio URL safely via env
+        if: ${{ inputs.audio_url != '' }}
+        env:
+          AUDIO_URL: ${{ inputs.audio_url }}
+        run: printf '::add-mask::%s\n' "$AUDIO_URL"
+
+      - name: Free unused GitHub runner disk space (~15 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+
+      - name: Cache HuggingFace & Torch models
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-pub-v4-${{ inputs.model_repo }}-align-${{ inputs.enable_whisperx_align }}-${{ hashFiles('stt/requirements.txt', 'stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-pub-v4-${{ inputs.model_repo }}-
+            stt-pub-v4-
+
+      - name: Install CPU-only Python stack (single unified resolution)
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchvision==0.23.0+cpu torchaudio==2.8.0+cpu \
+            -r stt/requirements.txt
+
+      - name: Normalize audio, split at Silero VAD silences & pre-warm model cache
+        id: prep
+        env:
+          AUDIO_URL: ${{ inputs.audio_url }}
+          AUDIO_FILE: ${{ inputs.audio_file }}
+          MODEL_REPO: ${{ inputs.model_repo }}
+          ENABLE_ALIGN: ${{ inputs.enable_whisperx_align }}
+          ENCRYPT_OUTPUT: ${{ inputs.encrypt_output }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ "$ENABLE_ALIGN" = "true" ] && [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --enable-align --redact-logs --work-dir stt/workspace --full-audio-dir stt/full_audio
+          elif [ "$ENABLE_ALIGN" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --enable-align --work-dir stt/workspace --full-audio-dir stt/full_audio
+          elif [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --redact-logs --work-dir stt/workspace --full-audio-dir stt/full_audio
+          else
+            python stt/scripts/prepare_audio.py --input-file "$AUDIO_FILE" --model-repo "$MODEL_REPO" --work-dir stt/workspace --full-audio-dir stt/full_audio
+          fi
+
+      - name: Upload audio chunks for Matrix workers
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-chunks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/workspace/
+          retention-days: 1
+
+      - name: Upload full clean WAV only if speaker diarization is enabled
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-fullwav-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/full_audio/clean_audio.wav
+          retention-days: 1
+
+  transcribe-chunk:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Free unused GitHub runner disk space (~15 GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+
+      - name: Restore cached HuggingFace & Torch models
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-pub-v4-${{ inputs.model_repo }}-align-${{ inputs.enable_whisperx_align }}-${{ hashFiles('stt/requirements.txt', 'stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-pub-v4-${{ inputs.model_repo }}-
+            stt-pub-v4-
+
+      - name: Install CPU-only Python stack (single unified resolution)
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchvision==0.23.0+cpu torchaudio==2.8.0+cpu \
+            -r stt/requirements.txt
+
+      - name: Download prepared audio chunks
+        uses: actions/download-artifact@v8
+        with:
+          name: stt-chunks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/workspace/
+
+      - name: Transcribe & align chunk ${{ matrix.padded_idx }}
+        env:
+          EXTRA_VOCABULARY: ${{ secrets.EXTRA_VOCABULARY }}
+          MODEL_REPO: ${{ inputs.model_repo }}
+          COMPUTE_TYPE: ${{ inputs.compute_type }}
+          BEAM_SIZE: ${{ inputs.beam_size }}
+          ENABLE_ALIGN: ${{ inputs.enable_whisperx_align }}
+          CHUNK_FILE: stt/workspace/chunks/${{ matrix.file }}
+          CHUNK_IDX: ${{ matrix.idx }}
+          OFFSET_SEC: ${{ matrix.offset_sec }}
+          PADDED_IDX: ${{ matrix.padded_idx }}
+        run: |
+          if [ "$ENABLE_ALIGN" = "true" ]; then
+            python stt/scripts/transcribe_chunk.py \
+              --chunk-file "$CHUNK_FILE" \
+              --chunk-idx "$CHUNK_IDX" \
+              --offset-sec "$OFFSET_SEC" \
+              --model-repo "$MODEL_REPO" \
+              --compute-type "$COMPUTE_TYPE" \
+              --beam-size "$BEAM_SIZE" \
+              --enable-align \
+              --vocab-file stt/vocabulary.txt \
+              --out-file "stt/chunk_results/chunk_${PADDED_IDX}.json"
+          else
+            python stt/scripts/transcribe_chunk.py \
+              --chunk-file "$CHUNK_FILE" \
+              --chunk-idx "$CHUNK_IDX" \
+              --offset-sec "$OFFSET_SEC" \
+              --model-repo "$MODEL_REPO" \
+              --compute-type "$COMPUTE_TYPE" \
+              --beam-size "$BEAM_SIZE" \
+              --vocab-file stt/vocabulary.txt \
+              --out-file "stt/chunk_results/chunk_${PADDED_IDX}.json"
+          fi
+
+      - name: Upload single chunk transcript JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: stt-chunk-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.padded_idx }}
+          path: stt/chunk_results/chunk_${{ matrix.padded_idx }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-and-diarize:
+    needs: [prepare, transcribe-chunk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Free unused GitHub runner disk space (~15 GB)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Checkout repository (no git credentials persisted)
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Restore HuggingFace & Torch cache (ONLY if diarize=true)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: stt-diarize-v4-${{ inputs.diarization_model }}-${{ hashFiles('stt/constraints-cpu.txt') }}
+          restore-keys: |
+            stt-diarize-v4-
+
+      - name: Ensure GPG is available (only if encryption enabled)
+        if: ${{ inputs.encrypt_output == true || inputs.encrypt_output == 'true' }}
+        run: |
+          if ! command -v gpg >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y gnupg
+          fi
+
+      - name: Install system libs & Pyannote CPU stack (ONLY if diarize=true)
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install --no-cache-dir --upgrade pip
+          pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c stt/constraints-cpu.txt \
+            torch==2.8.0+cpu torchaudio==2.8.0+cpu \
+            "pyannote.audio>=4.0.0" soundfile omegaconf
+
+      - name: Download all chunk JSON files into isolated folder
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "stt-chunk-${{ github.run_id }}-${{ github.run_attempt }}-*"
+          merge-multiple: true
+          path: stt/merged_inputs/chunks/
+
+      - name: Download full WAV only if diarization is enabled
+        if: ${{ inputs.diarize == true || inputs.diarize == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: stt-fullwav-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stt/merged_inputs/full_audio/
+
+      - name: Merge chunks & run optional speaker diarization
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DIARIZE: ${{ inputs.diarize }}
+          DIARIZATION_MODEL: ${{ inputs.diarization_model }}
+          SLUG: ${{ needs.prepare.outputs.slug }}
+        run: |
+          if [ "$DIARIZE" = "true" ]; then
+            python stt/scripts/merge_and_diarize.py \
+              --chunks-dir stt/merged_inputs/chunks \
+              --slug "$SLUG" \
+              --diarize \
+              --diarization-model "$DIARIZATION_MODEL" \
+              --clean-wav "stt/merged_inputs/full_audio/clean_audio.wav" \
+              --out-dir stt/transcripts
+          else
+            python stt/scripts/merge_and_diarize.py \
+              --chunks-dir stt/merged_inputs/chunks \
+              --slug "$SLUG" \
+              --out-dir stt/transcripts
+          fi
+
+      - name: Optional AES-256 encryption for public-repo privacy
+        id: pack
+        env:
+          TRANSCRIPT_PASSPHRASE: ${{ secrets.TRANSCRIPT_PASSPHRASE }}
+          ENCRYPT_OUTPUT: ${{ inputs.encrypt_output }}
+        run: |
+          if [ "$ENCRYPT_OUTPUT" = "true" ]; then
+            if [ -z "$TRANSCRIPT_PASSPHRASE" ]; then
+              echo "::error::encrypt_output=true requires TRANSCRIPT_PASSPHRASE secret."
+              exit 1
+            fi
+            tar -czf stt/transcripts.tar.gz -C stt/transcripts .
+            printf '%s' "$TRANSCRIPT_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --symmetric --cipher-algo AES256 -o stt/transcripts-encrypted.tar.gz.gpg stt/transcripts.tar.gz
+            rm -rf stt/transcripts stt/transcripts.tar.gz
+            echo "artifact_path=stt/transcripts-encrypted.tar.gz.gpg" >> "$GITHUB_OUTPUT"
+          else
+            echo "artifact_path=stt/transcripts/" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload final transcripts artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: transcripts-${{ needs.prepare.outputs.slug }}-run-${{ github.run_number }}-${{ github.run_attempt }}
+          path: ${{ steps.pack.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 3

@@ -60,3 +60,17 @@ Zero-AI, fully deterministic deep website extraction engine running on **Node.js
 2. Open **Actions -> Deep Site Extractor for AI -> Run workflow**.
 3. Enter `target_url` (including `https://`), optionally adjust `max_pages`, `max_depth`, `enable_katana`, `enable_purgecss`, `enable_singlefile`, and click **Run workflow**.
 4. Download the output directly from `extractions/ai-site-context-run-<N>-<A>.txt` in the repository or from **Artifacts**.
+
+---
+
+## Hebrew STT Subsystem (`stt/`)
+
+An isolated, asynchronous **Hebrew Speech-to-Text** pipeline running on GitHub Actions (`ubuntu-24.04`) via `.github/workflows/hebrew-stt.yml`, completely decoupled from the Node.js site-extraction engine (no shared dependencies, caches, or workflow permissions).
+
+### Key Capabilities
+
+- **Audio Preparation (`stt/scripts/prepare_audio.py`)**: Safe media download with HTML/403 detection and retries, `FFmpeg` bandpass (`80Hz–7600Hz`) + `loudnorm` normalization to 16 kHz mono WAV, **Silero VAD** silence-only chunking (~12 min chunks), and HuggingFace cache pre-warming.
+- **Matrix Transcription & Alignment (`stt/scripts/transcribe_chunk.py`)**: Parallel execution across up to 20 runners using `ivrit-ai/whisper-large-v3-ct2` (or `turbo-ct2`) with auto-RAM precision (`float32` on 16 GB / `int8_float32` on lower RAM), `stt/vocabulary.txt` + `EXTRA_VOCABULARY` secret prompts/hotwords, and **WhisperX** (`imvladikon/wav2vec2-xls-r-300m-hebrew`) forced word-level alignment with automatic fallback on digits/Latin text.
+- **Merge & Optional Diarization (`stt/scripts/merge_and_diarize.py`)**: Lazy-imports PyTorch/pyannote only when `diarize=true` (requires `HF_TOKEN` secret), aligns speaker turns (`pyannote/speaker-diarization-3.1` / `community-1`), and exports `.txt`, `.srt`, `.vtt`, and `.json`.
+- **Public-Repo Security Hardening**: Read-only `contents: read` permissions, `persist-credentials: false`, `env:`-bound inputs with `::add-mask::` for `audio_url`, fail-fast validation, and optional AES-256 GPG encryption (`encrypt_output: true` with `TRANSCRIPT_PASSPHRASE` secret, decryptable locally via `gpg -d transcripts-encrypted.tar.gz.gpg | tar -xz`).
+

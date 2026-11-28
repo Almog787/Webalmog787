@@ -9,3 +9,15 @@ repomix-output.*
 *.log
 .env*
 !.env.example
+
+# Hebrew STT Engine (isolated under stt/)
+stt/workspace/
+stt/full_audio/
+stt/chunk_results/
+stt/merged_inputs/
+stt/transcripts/
+stt/transcripts.tar.gz
+stt/transcripts-encrypted.tar.gz.gpg
+stt/input_audio/*
+!stt/input_audio/.gitkeep
+

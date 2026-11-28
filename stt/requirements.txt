@@ -1,0 +1,6 @@
+whisperx==3.8.6
+faster-whisper>=1.2.0
+silero-vad>=5.1.2
+soundfile>=0.12.1
+psutil>=6.0.0
+huggingface-hub>=0.28.1
